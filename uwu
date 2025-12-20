@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""
+UwU Toolkit - A modular penetration testing framework
+Inspired by Metasploit, designed for custom exploits and CTF challenges
+"""
+
+import os
+import sys
+import json
+import readline
+import subprocess
+import shutil
+import argparse
+from pathlib import Path
+from typing import Optional, Dict, List, Any
+from datetime import datetime
+
+# Add the toolkit directory to path
+TOOLKIT_ROOT = Path(__file__).parent.resolve()
+sys.path.insert(0, str(TOOLKIT_ROOT))
+
+from core.console import UwUConsole
+from core.config import Config
+
+def main():
+    """Main entry point for UwU Toolkit"""
+    parser = argparse.ArgumentParser(description="UwU Toolkit - Modular Penetration Testing Framework")
+    parser.add_argument("-x", "--exec", dest="exec_cmds", metavar="COMMANDS",
+                       help="Execute semicolon-separated commands and exit")
+    parser.add_argument("-r", "--resource", dest="resource_file", metavar="FILE",
+                       help="Execute commands from resource file")
+    parser.add_argument("-q", "--quiet", action="store_true",
+                       help="Suppress banner output")
+
+    args, remaining = parser.parse_known_args()
+
+    config = Config()
+    console = UwUConsole(config, quiet=args.quiet)
+
+    # Handle batch execution mode
+    if args.exec_cmds:
+        # Execute semicolon-separated commands
+        commands = [cmd.strip() for cmd in args.exec_cmds.split(";") if cmd.strip()]
+        for cmd in commands:
+            console.execute_command(cmd)
+        return
+
+    # Handle resource file mode
+    if args.resource_file:
+        try:
+            with open(args.resource_file, 'r') as f:
+                commands = [line.strip() for line in f if line.strip() and not line.startswith('#')]
+            for cmd in commands:
+                console.execute_command(cmd)
+        except FileNotFoundError:
+            print(f"Resource file not found: {args.resource_file}")
+            sys.exit(1)
+        return
+
+    # Handle single command from remaining arguments
+    if remaining:
+        command = " ".join(remaining)
+        console.execute_command(command)
+    else:
+        # Interactive mode
+        console.run()
+
+if __name__ == "__main__":
+    main()

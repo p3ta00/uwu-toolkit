@@ -1,0 +1,11 @@
+ I want to make a tool called uwu toolkit that runs identical as metasploit for for my made exploits and scripts. that used modules
+  for scalability. I want to be able to do stuff like search SMB and it will search all the SMB tools i have made or etc for rdp linuix
+  windows and etc. another example would be search enumeration and it will show the enumeration tools like my custom nmap and
+  dirsearch tool that i will make. I want to be able to setg to set a global variable within the system as well so it will persist
+  outside of the tool and work on the host. create and exegol container and search all the variables in the history file for what its
+  looking for. Use exegol as a baseline so when we make a tool it uses those formats for structure. i want a command to show all the
+  variables configured globally and have an easy option to change them. once a variable is set have it stored in the tool. for example
+  if i want to change my user i can type setg or set user [] and it will list all the users that i previously set so i can scroll down
+  and change to the one i want. allow this feature to work for all the variables like password target and etc that are in the history.
+  What other good ideas would you recommend for a professional pentest tool and ctf. I am not concerned with multiplayer yet.
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,207 @@
+from core.module_base import ModuleBase, ModuleType, Platform
+
+
+class UserEnum(ModuleBase):
+    def __init__(self):
+        super().__init__()
+        self.name = "user_enum"
+        self.description = "Enumerate local users, groups, logged-on users, and interesting user directories"
+        self.author = "HTB-Auto"
+        self.module_type = ModuleType.POST
+        self.platform = Platform.WINDOWS
+        self.tags = ["post", "enumeration", "users", "groups", "windows", "gather"]
+
+        self.register_option("SESSION", "Session ID to use", required=True)
+        self.register_option("ENUM_GROUPS", "Enumerate local groups", required=False, default="true")
+        self.register_option("ENUM_LOGGED_ON", "Enumerate logged-on users", required=False, default="true")
+        self.register_option("ENUM_DIRECTORIES", "Enumerate interesting user directories", required=False, default="true")
+        self.register_option("CHECK_PROFILES", "Check user profile directories for interesting files", required=False, default="true")
+
+    def run(self) -> bool:
+        session_id = self.get_option("SESSION")
+        enum_groups = self.get_option("ENUM_GROUPS").lower() == "true"
+        enum_logged_on = self.get_option("ENUM_LOGGED_ON").lower() == "true"
+        enum_directories = self.get_option("ENUM_DIRECTORIES").lower() == "true"
+        check_profiles = self.get_option("CHECK_PROFILES").lower() == "true"
+
+        self.print_status(f"Starting user enumeration on session {session_id}")
+
+        # Enumerate local users
+        self.print_status("Enumerating local users...")
+        users_result = self.execute_command(session_id, "net user")
+        if users_result:
+            self.print_good("Local Users:")
+            self.print_info(users_result)
+            self._parse_users(session_id, users_result)
+
+        # Enumerate local groups
+        if enum_groups:
+            self.print_status("Enumerating local groups...")
+            groups_result = self.execute_command(session_id, "net localgroup")
+            if groups_result:
+                self.print_good("Local Groups:")
+                self.print_info(groups_result)
+                self._enumerate_interesting_groups(session_id)
+
+        # Enumerate logged-on users
+        if enum_logged_on:
+            self.print_status("Enumerating logged-on users...")
+            self._enumerate_logged_on_users(session_id)
+
+        # Enumerate interesting user directories
+        if enum_directories:
+            self.print_status("Enumerating user directories...")
+            self._enumerate_user_directories(session_id, check_profiles)
+
+        # Get current user context
+        self.print_status("Getting current user context...")
+        whoami_result = self.execute_command(session_id, "whoami /all")
+        if whoami_result:
+            self.print_good("Current User Context:")
+            self.print_info(whoami_result)
+
+        self.print_good("User enumeration completed")
+        return True
+
+    def _parse_users(self, session_id: str, users_output: str) -> None:
+        """Parse user list and get detailed info for each user"""
+        lines = users_output.split('\n')
+        users = []
+        
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith('-') and not line.startswith('User accounts') and not line.startswith('The command'):
+                parts = line.split()
+                users.extend(parts)
+
+        for user in users:
+            if user and user not in ['User', 'accounts', 'for', 'The', 'command', 'completed', 'successfully.']:
+                self.print_status(f"Getting details for user: {user}")
+                user_detail = self.execute_command(session_id, f"net user {user}")
+                if user_detail:
+                    self.print_info(f"Details for {user}:")
+                    self.print_info(user_detail)
+
+    def _enumerate_interesting_groups(self, session_id: str) -> None:
+        """Enumerate members of interesting groups"""
+        interesting_groups = [
+            "Administrators",
+            "Remote Desktop Users",
+            "Remote Management Users",
+            "Backup Operators",
+            "Power Users",
+            "Domain Admins",
+            "Enterprise Admins",
+            "Schema Admins"
+        ]
+
+        for group in interesting_groups:
+            self.print_status(f"Checking group: {group}")
+            group_members = self.execute_command(session_id, f'net localgroup "{group}" 2>nul')
+            if group_members and "The specified local group does not exist" not in group_members:
+                self.print_good(f"Members of {group}:")
+                self.print_info(group_members)
+
+    def _enumerate_logged_on_users(self, session_id: str) -> None:
+        """Enumerate currently logged-on users"""
+        # Query user sessions
+        quser_result = self.execute_command(session_id, "quser 2>nul")
+        if quser_result:
+            self.print_good("User Sessions (quser):")
+            self.print_info(quser_result)
+
+        # Query using qwinsta
+        qwinsta_result = self.execute_command(session_id, "qwinsta 2>nul")
+        if qwinsta_result:
+            self.print_good("Terminal Sessions (qwinsta):")
+            self.print_info(qwinsta_result)
+
+        # WMI query for logged-on users
+        wmi_result = self.execute_command(
+            session_id,
+            'wmic computersystem get username 2>nul'
+        )
+        if wmi_result:
+            self.print_good("Logged-on User (WMI):")
+            self.print_info(wmi_result)
+
+        # Check for user processes
+        self.print_status("Checking for user processes...")
+        tasklist_result = self.execute_command(
+            session_id,
+            'tasklist /V /FO CSV 2>nul | findstr /i "explorer.exe"'
+        )
+        if tasklist_result:
+            self.print_good("Explorer processes (indicates logged-on users):")
+            self.print_info(tasklist_result)
+
+    def _enumerate_user_directories(self, session_id: str, check_profiles: bool) -> None:
+        """Enumerate user directories and look for interesting files"""
+        # List user profile directories
+        users_dir = self.execute_command(session_id, 'dir /b C:\\Users 2>nul')
+        if users_dir:
+            self.print_good("User Profile Directories:")
+            self.print_info(users_dir)
+
+            if check_profiles:
+                users = [u.strip() for u in users_dir.split('\n') if u.strip()]
+                for user in users:
+                    if user.lower() not in ['public', 'default', 'default user', 'all users']:
+                        self._check_user_profile(session_id, user)
+
+    def _check_user_profile(self, session_id: str, username: str) -> None:
+        """Check user profile for interesting files and directories"""
+        self.print_status(f"Checking profile for user: {username}")
+        
+        interesting_paths = [
+            f"C:\\Users\\{username}\\Desktop",
+            f"C:\\Users\\{username}\\Documents",
+            f"C:\\Users\\{username}\\Downloads",
+            f"C:\\Users\\{username}\\.ssh",
+            f"C:\\Users\\{username}\\AppData\\Local\\Temp",
+            f"C:\\Users\\{username}\\AppData\\Roaming\\Microsoft\\Windows\\PowerShell\\PSReadLine",
+            f"C:\\Users\\{username}\\AppData\\Roaming\\mRemoteNG",
+            f"C:\\Users\\{username}\\AppData\\Local\\Microsoft\\Credentials",
+            f"C:\\Users\\{username}\\AppData\\Roaming\\Microsoft\\Credentials",
+            f"C:\\Users\\{username}\\NTUSER.DAT",
+        ]
+
+        interesting_files = [
+            "*.txt",
+            "*.xml",
+            "*.ini",
+            "*.config",
+            "*.rdp",
+            "*.vnc",
+            "*.kdbx",
+            "*.key",
+            "*.pem",
+            "*.ppk",
+            "ConsoleHost_history.txt",
+            "confCons.xml",
+        ]
+
+        for path in interesting_paths:
+            result = self.execute_command(session_id, f'dir /a "{path}" 2>nul')
+            if result and "File Not Found" not in result and "The system cannot find" not in result:
+                self.print_good(f"Contents of {path}:")
+                self.print_info(result)
+
+        # Search for interesting files in user directory
+        for pattern in interesting_files:
+            result = self.execute_command(
+                session_id,
+                f'dir /s /b "C:\\Users\\{username}\\{pattern}" 2>nul'
+            )
+            if result and result.strip():
+                self.print_good(f"Found {pattern} files for {username}:")
+                self.print_info(result)
+
+    def execute_command(self, session_id: str, command: str) -> str:
+        """Execute a command on the target system via the session"""
+        try:
+            result = self.session_exec(session_id, command)
+            return result if result else ""
+        except Exception as e:
+            self.print_error(f"Failed to execute command: {e}")
+            return ""

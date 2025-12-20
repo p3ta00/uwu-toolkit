@@ -1,0 +1,784 @@
+#!/usr/bin/env python3
+"""
+UwU Toolkit Dashboard - Real-time monitoring for servers and connections
+Run in a separate terminal/pane to monitor activity
+"""
+
+import os
+import sys
+import json
+import time
+import signal
+import subprocess
+import curses
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, List, Any, Optional
+
+# Add the toolkit directory to path
+TOOLKIT_ROOT = Path(__file__).parent.resolve()
+sys.path.insert(0, str(TOOLKIT_ROOT))
+
+from core.colors import Colors
+
+# Status file location
+STATUS_DIR = Path.home() / ".uwu-toolkit"
+STATUS_FILE = STATUS_DIR / "dashboard_status.json"
+EVENTS_FILE = STATUS_DIR / "dashboard_events.json"
+
+# Maximum events to keep
+MAX_EVENTS = 50
+
+
+class Dashboard:
+    """Real-time monitoring dashboard for UwU Toolkit"""
+
+    def __init__(self):
+        self.running = True
+        self.status: Dict[str, Any] = {}
+        self.events: List[Dict] = []
+        self.last_update = None
+
+        # Sliver session cache (to avoid spamming join/leave messages)
+        self._sliver_cache: List[Dict] = []
+        self._sliver_cache_time: float = 0
+        self._sliver_cache_ttl: float = 30.0  # Only query Sliver every 30 seconds
+
+        # Ensure status directory exists
+        STATUS_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Initialize status file if needed
+        if not STATUS_FILE.exists():
+            self._write_status({})
+
+    def _read_status(self) -> Dict[str, Any]:
+        """Read current status from shared file"""
+        try:
+            if STATUS_FILE.exists():
+                with open(STATUS_FILE, 'r') as f:
+                    return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+        return {}
+
+    def _write_status(self, status: Dict[str, Any]) -> None:
+        """Write status to shared file"""
+        try:
+            with open(STATUS_FILE, 'w') as f:
+                json.dump(status, f, indent=2, default=str)
+        except IOError:
+            pass
+
+    def _read_events(self) -> List[Dict]:
+        """Read events from shared file"""
+        try:
+            if EVENTS_FILE.exists():
+                with open(EVENTS_FILE, 'r') as f:
+                    return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            pass
+        return []
+
+    def _detect_http_servers(self) -> List[Dict]:
+        """Detect running HTTP servers (gosh servers)"""
+        servers = []
+
+        # Method 1: Check using ps for python http.server processes
+        try:
+            result = subprocess.run(
+                ["ps", "aux"],
+                capture_output=True, text=True, timeout=5
+            )
+            import re
+            for line in result.stdout.strip().split('\n'):
+                if 'http.server' in line and 'python' in line:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        pid = parts[1]
+                        # Extract port from the command
+                        port = "8000"
+                        match = re.search(r'http\.server\s+(\d+)', line)
+                        if match:
+                            port = match.group(1)
+                        servers.append({
+                            "type": "gosh",
+                            "pid": pid,
+                            "port": port,
+                            "status": "running"
+                        })
+        except:
+            pass
+
+        try:
+            # Check for PHP servers
+            result = subprocess.run(
+                ["pgrep", "-a", "-f", "php.*-S"],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.strip().split('\n'):
+                if line:
+                    parts = line.split(None, 1)
+                    if len(parts) >= 2:
+                        pid = parts[0]
+                        cmd = parts[1]
+                        port = "8080"
+                        if "-S" in cmd:
+                            # Try to extract host:port
+                            import re
+                            match = re.search(r'-S\s+[\d.]+:(\d+)', cmd)
+                            if match:
+                                port = match.group(1)
+                        servers.append({
+                            "type": "PHP Server",
+                            "pid": pid,
+                            "port": port,
+                            "status": "running"
+                        })
+        except:
+            pass
+
+        return servers
+
+    def _detect_listeners(self) -> List[Dict]:
+        """Detect running listeners (netcat, sliver, etc.)"""
+        listeners = []
+
+        try:
+            # Check for netcat listeners - use ss to find actual listening sockets
+            import re
+            result = subprocess.run(
+                ["ss", "-tlnp"],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.strip().split('\n'):
+                # Look for actual netcat binaries - be specific to avoid false positives
+                # Match: "nc", "ncat", "netcat" as the process name (not substring like Xtigervnc)
+                if re.search(r'\("(nc|ncat|netcat)"', line):
+                    # Extract port from LISTEN line: 0.0.0.0:4444 or *:4444
+                    port_match = re.search(r'[:\*](\d{2,5})\s', line)
+                    if port_match:
+                        port = port_match.group(1)
+                        # Extract PID
+                        pid_match = re.search(r'pid=(\d+)', line)
+                        pid = pid_match.group(1) if pid_match else "?"
+                        listeners.append({
+                            "type": "Netcat",
+                            "pid": pid,
+                            "port": port,
+                            "status": "listening"
+                        })
+        except:
+            pass
+
+        try:
+            # Check for Sliver server and get actual listening port
+            result = subprocess.run(
+                ["pgrep", "-f", "sliver-server"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.stdout.strip():
+                pid = result.stdout.strip().split('\n')[0]
+                # Get actual port from ss
+                port = "31337"  # default
+                try:
+                    ss_result = subprocess.run(
+                        ["ss", "-tlnp"],
+                        capture_output=True, text=True, timeout=3
+                    )
+                    for ss_line in ss_result.stdout.split('\n'):
+                        if 'sliver-server' in ss_line:
+                            # Extract port from LISTEN line
+                            port_match = re.search(r':(\d+)\s', ss_line)
+                            if port_match:
+                                port = port_match.group(1)
+                                break
+                except:
+                    pass
+                listeners.append({
+                    "type": "Sliver C2",
+                    "pid": pid,
+                    "port": port,
+                    "status": "running"
+                })
+        except:
+            pass
+
+        # Deduplicate by port (keep first occurrence)
+        seen_ports = set()
+        unique_listeners = []
+        for l in listeners:
+            if l['port'] not in seen_ports:
+                seen_ports.add(l['port'])
+                unique_listeners.append(l)
+
+        return unique_listeners
+
+    def _detect_connections(self) -> List[Dict]:
+        """Detect active reverse shell connections"""
+        connections = []
+
+        try:
+            # Check for established connections on common ports
+            result = subprocess.run(
+                ["ss", "-tnp", "state", "established"],
+                capture_output=True, text=True, timeout=5
+            )
+            for line in result.stdout.strip().split('\n')[1:]:  # Skip header
+                if line and ('nc' in line or 'python' in line or 'bash' in line):
+                    parts = line.split()
+                    if len(parts) >= 5:
+                        local = parts[3]
+                        remote = parts[4]
+                        connections.append({
+                            "local": local,
+                            "remote": remote,
+                            "process": parts[-1] if len(parts) > 5 else "unknown"
+                        })
+        except:
+            pass
+
+        return connections
+
+    def _detect_sliver_sessions(self) -> List[Dict]:
+        """Detect active Sliver sessions via network connections (no client query to avoid spam)"""
+        import re
+
+        # Use cache if still valid
+        now = time.time()
+        if now - self._sliver_cache_time < self._sliver_cache_ttl:
+            return self._sliver_cache
+
+        sessions = []
+
+        # Detect via network connections only (no sliver-client query = no join/leave spam)
+        def extract_ip_port(addr):
+            """Extract IP and port from address, handling IPv6-mapped IPv4"""
+            import re
+            match = re.search(r'\[::ffff:([\d.]+)\]:(\d+)', addr)
+            if match:
+                return match.group(1), match.group(2)
+            if ':' in addr and not addr.startswith('['):
+                parts = addr.rsplit(':', 1)
+                return parts[0], parts[1]
+            return addr, '?'
+
+        try:
+            result = subprocess.run(
+                ["ss", "-tnp", "state", "established"],
+                capture_output=True, text=True, timeout=5
+            )
+
+            for line in result.stdout.strip().split('\n')[1:]:
+                if not line:
+                    continue
+
+                if 'sliver-server' not in line:
+                    continue
+
+                import re
+                ip_port_pattern = r'(\[::ffff:[\d.]+\]:\d+|[\d.]+:\d+)'
+                matches = re.findall(ip_port_pattern, line)
+
+                if len(matches) >= 2:
+                    local_raw = matches[0]
+                    remote_raw = matches[1]
+
+                    local_ip, local_port = extract_ip_port(local_raw)
+                    remote_ip, remote_port = extract_ip_port(remote_raw)
+
+                    if remote_ip.startswith('127.') or remote_ip == 'localhost':
+                        continue
+
+                    if local_port == '31337':
+                        continue
+
+                    sessions.append({
+                        "id": remote_ip.replace('.', '')[-8:],
+                        "name": f"implant:{local_port}",
+                        "remote": f"{remote_ip}:{remote_port}",
+                        "hostname": "?",
+                        "user": "?",
+                        "os": "?",
+                        "type": "session",
+                        "port": local_port
+                    })
+        except:
+            pass
+
+        # De-duplicate by remote address
+        seen = set()
+        unique_sessions = []
+        for s in sessions:
+            if s['remote'] not in seen:
+                seen.add(s['remote'])
+                unique_sessions.append(s)
+
+        # Update cache
+        self._sliver_cache = unique_sessions
+        self._sliver_cache_time = now
+        return unique_sessions
+
+    def _detect_ligolo_pivots(self) -> List[Dict]:
+        """Detect Ligolo-ng tunnels, agent connections, and routes"""
+        pivots = []
+        proxy_port = None
+        import re
+
+        # Check if ligolo-proxy is running and get port
+        try:
+            result = subprocess.run(
+                ["pgrep", "-a", "-f", "ligolo"],
+                capture_output=True, text=True, timeout=3
+            )
+            if result.stdout.strip():
+                for line in result.stdout.strip().split('\n'):
+                    if 'proxy' in line.lower() or 'ligolo-proxy' in line:
+                        # Extract port from command line (e.g., -laddr 0.0.0.0:8443)
+                        proxy_port = "11601"  # default
+                        port_match = re.search(r'-laddr\s+[\d.]+:(\d+)', line)
+                        if port_match:
+                            proxy_port = port_match.group(1)
+                        else:
+                            port_match = re.search(r':(\d+)', line)
+                            if port_match:
+                                proxy_port = port_match.group(1)
+                        break
+        except:
+            pass
+
+        # Check for agent connections to the proxy port
+        if proxy_port:
+            try:
+                result = subprocess.run(
+                    ["ss", "-tn", "state", "established", f"sport = :{proxy_port}"],
+                    capture_output=True, text=True, timeout=3
+                )
+                agents = []
+                for line in result.stdout.strip().split('\n')[1:]:  # Skip header
+                    if not line.strip():
+                        continue
+                    # Format: Recv-Q Send-Q Local Address:Port Peer Address:Port
+                    # Example: 0      0      0.0.0.0:8443       10.10.11.50:54321
+                    # Or:      0      0      [::ffff:10.10.14.5]:8443 [::ffff:10.10.11.50]:54321
+
+                    # Find all IP:port patterns (IPv4 or IPv6-mapped)
+                    # Match IPv6-mapped: [::ffff:10.10.11.50]:port
+                    ipv6_mapped = re.findall(r'\[::ffff:([\d.]+)\]:(\d+)', line)
+                    if len(ipv6_mapped) >= 2:
+                        # Second match is peer address
+                        peer_ip = ipv6_mapped[1][0]
+                        if not peer_ip.startswith('127.'):
+                            agents.append(peer_ip)
+                        continue
+
+                    # Match regular IPv4: 10.10.11.50:port
+                    ipv4_matches = re.findall(r'(\d+\.\d+\.\d+\.\d+):(\d+)', line)
+                    if len(ipv4_matches) >= 2:
+                        # Second match is peer address
+                        peer_ip = ipv4_matches[1][0]
+                        if not peer_ip.startswith('127.') and peer_ip != '0.0.0.0':
+                            agents.append(peer_ip)
+
+                if agents:
+                    for agent_ip in agents:
+                        pivots.append({
+                            "type": "agent",
+                            "network": agent_ip,
+                            "interface": proxy_port
+                        })
+                else:
+                    # Proxy running but no agents
+                    pivots.append({
+                        "type": "proxy",
+                        "network": "no agents",
+                        "interface": proxy_port
+                    })
+            except:
+                pivots.append({
+                    "type": "proxy",
+                    "network": "listening",
+                    "interface": proxy_port
+                })
+
+        # Check if ligolo TUN interface exists and get routes
+        try:
+            result = subprocess.run(
+                ["ip", "link", "show", "ligolo"],
+                capture_output=True, text=True, timeout=3
+            )
+            if result.returncode == 0:
+                # Interface exists, get routes through it
+                route_result = subprocess.run(
+                    ["ip", "route"],
+                    capture_output=True, text=True, timeout=3
+                )
+                for line in route_result.stdout.strip().split('\n'):
+                    if 'ligolo' in line:
+                        # Parse route: 10.10.10.0/24 dev ligolo
+                        parts = line.split()
+                        if len(parts) >= 1:
+                            network = parts[0]
+                            pivots.append({
+                                "type": "route",
+                                "network": network,
+                                "interface": "ligolo"
+                            })
+        except:
+            pass
+
+        return pivots
+
+    def _get_working_dir(self) -> str:
+        """Get current working directory from config"""
+        try:
+            globals_file = STATUS_DIR / "globals.json"
+            if globals_file.exists():
+                with open(globals_file, 'r') as f:
+                    data = json.load(f)
+                    return data.get("WORKING_DIR", os.getcwd())
+        except:
+            pass
+        return os.getcwd()
+
+    def run_simple(self):
+        """Run dashboard in simple mode (no curses)"""
+        print(f"\n{Colors.NEON_PINK}╔══════════════════════════════════════════════════════════════╗{Colors.RESET}")
+        print(f"{Colors.NEON_PINK}║{Colors.RESET}  {Colors.NEON_CYAN}UwU Toolkit Dashboard{Colors.RESET}                                      {Colors.NEON_PINK}║{Colors.RESET}")
+        print(f"{Colors.NEON_PINK}║{Colors.RESET}  {Colors.DIM}Press Ctrl+C to exit{Colors.RESET}                                       {Colors.NEON_PINK}║{Colors.RESET}")
+        print(f"{Colors.NEON_PINK}╚══════════════════════════════════════════════════════════════╝{Colors.RESET}")
+        print()
+
+        def handle_sigint(sig, frame):
+            self.running = False
+            print(f"\n{Colors.NEON_CYAN}[*]{Colors.RESET} Dashboard stopped")
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, handle_sigint)
+
+        last_servers = []
+        last_listeners = []
+        last_connections = []
+        last_sliver_sessions = []
+
+        while self.running:
+            try:
+                # Detect current state
+                servers = self._detect_http_servers()
+                listeners = self._detect_listeners()
+                connections = self._detect_connections()
+                sliver_sessions = self._detect_sliver_sessions()
+                working_dir = self._get_working_dir()
+                events = self._read_events()
+
+                # Check for changes and print updates
+                now = datetime.now().strftime("%H:%M:%S")
+
+                # New servers
+                for s in servers:
+                    if s not in last_servers:
+                        print(f"{Colors.NEON_GREEN}[+]{Colors.RESET} [{now}] {s['type']} started on port {Colors.NEON_YELLOW}{s['port']}{Colors.RESET} (PID: {s['pid']})")
+
+                # Stopped servers
+                for s in last_servers:
+                    if s not in servers:
+                        print(f"{Colors.NEON_ORANGE}[-]{Colors.RESET} [{now}] {s['type']} stopped (was port {s['port']})")
+
+                # New listeners
+                for l in listeners:
+                    if l not in last_listeners:
+                        print(f"{Colors.NEON_GREEN}[+]{Colors.RESET} [{now}] {l['type']} listening on port {Colors.NEON_YELLOW}{l['port']}{Colors.RESET}")
+
+                # Stopped listeners
+                for l in last_listeners:
+                    if l not in listeners:
+                        print(f"{Colors.NEON_ORANGE}[-]{Colors.RESET} [{now}] {l['type']} stopped (was port {l['port']})")
+
+                # New connections (potential shells!)
+                for c in connections:
+                    if c not in last_connections:
+                        print(f"{Colors.NEON_PINK}[!!!]{Colors.RESET} [{now}] {Colors.NEON_GREEN}NEW CONNECTION{Colors.RESET} from {Colors.NEON_CYAN}{c['remote']}{Colors.RESET} -> {c['local']}")
+
+                # Lost connections
+                for c in last_connections:
+                    if c not in connections:
+                        print(f"{Colors.NEON_ORANGE}[x]{Colors.RESET} [{now}] Connection closed: {c['remote']}")
+
+                # New Sliver sessions/beacons
+                last_ids = {s['id'] for s in last_sliver_sessions}
+                for s in sliver_sessions:
+                    if s['id'] not in last_ids:
+                        stype = s['type'].upper()
+                        print(f"\n{Colors.NEON_PINK}{'='*60}{Colors.RESET}")
+                        print(f"{Colors.NEON_GREEN}[★★★]{Colors.RESET} [{now}] {Colors.NEON_PINK}NEW SLIVER {stype}!{Colors.RESET}")
+                        print(f"      {Colors.NEON_CYAN}ID:{Colors.RESET} {s['id']}  {Colors.NEON_CYAN}Name:{Colors.RESET} {s['name']}")
+                        print(f"      {Colors.NEON_CYAN}Host:{Colors.RESET} {s['hostname']}  {Colors.NEON_CYAN}User:{Colors.RESET} {s['user']}")
+                        print(f"      {Colors.NEON_CYAN}Remote:{Colors.RESET} {s['remote']}  {Colors.NEON_CYAN}OS:{Colors.RESET} {s['os']}")
+                        print(f"{Colors.NEON_PINK}{'='*60}{Colors.RESET}\n")
+
+                # Lost Sliver sessions
+                current_ids = {s['id'] for s in sliver_sessions}
+                for s in last_sliver_sessions:
+                    if s['id'] not in current_ids:
+                        print(f"{Colors.NEON_ORANGE}[x]{Colors.RESET} [{now}] Sliver {s['type']} lost: {s['name']} ({s['hostname']})")
+
+                last_servers = servers
+                last_listeners = listeners
+                last_connections = connections
+                last_sliver_sessions = sliver_sessions
+
+                time.sleep(2)
+
+            except KeyboardInterrupt:
+                break
+            except Exception as e:
+                print(f"{Colors.RED}[!]{Colors.RESET} Error: {e}")
+                time.sleep(5)
+
+    def run_curses(self, stdscr):
+        """Run dashboard with curses UI"""
+        curses.curs_set(0)
+        curses.start_color()
+        curses.use_default_colors()
+
+        # Define color pairs
+        curses.init_pair(1, curses.COLOR_MAGENTA, -1)  # Pink
+        curses.init_pair(2, curses.COLOR_CYAN, -1)     # Cyan
+        curses.init_pair(3, curses.COLOR_GREEN, -1)    # Green
+        curses.init_pair(4, curses.COLOR_YELLOW, -1)   # Yellow
+        curses.init_pair(5, curses.COLOR_RED, -1)      # Red
+        curses.init_pair(6, curses.COLOR_BLUE, -1)     # Blue (Ligolo)
+
+        stdscr.timeout(2000)  # 2 second refresh
+
+        event_log = []
+
+        while self.running:
+            try:
+                stdscr.clear()
+                height, width = stdscr.getmaxyx()
+
+                # Detect current state
+                servers = self._detect_http_servers()
+                listeners = self._detect_listeners()
+                connections = self._detect_connections()
+                sliver_sessions = self._detect_sliver_sessions()
+                working_dir = self._get_working_dir()
+                now = datetime.now().strftime("%H:%M:%S")
+
+                row = 0
+
+                # Header
+                header = "═" * (width - 2)
+                stdscr.attron(curses.color_pair(1))
+                stdscr.addstr(row, 0, f"╔{header}╗"[:width-1])
+                row += 1
+                title = "UwU Toolkit Dashboard"
+                padding = (width - len(title) - 4) // 2
+                stdscr.addstr(row, 0, f"║{' ' * padding}{title}{' ' * (width - padding - len(title) - 3)}║"[:width-1])
+                row += 1
+                stdscr.addstr(row, 0, f"╚{header}╝"[:width-1])
+                stdscr.attroff(curses.color_pair(1))
+                row += 2
+
+                # Working Directory
+                stdscr.attron(curses.color_pair(2))
+                stdscr.addstr(row, 0, f"Working Dir: ")
+                stdscr.attroff(curses.color_pair(2))
+                stdscr.addstr(row, 13, working_dir[:width-14])
+                row += 2
+
+                # HTTP Servers section
+                stdscr.attron(curses.color_pair(4) | curses.A_BOLD)
+                stdscr.addstr(row, 0, "HTTP Servers")
+                stdscr.attroff(curses.color_pair(4) | curses.A_BOLD)
+                row += 1
+                stdscr.addstr(row, 0, "─" * min(40, width-1))
+                row += 1
+
+                if servers:
+                    for s in servers:
+                        stdscr.attron(curses.color_pair(3))
+                        stdscr.addstr(row, 0, f"● ")
+                        stdscr.attroff(curses.color_pair(3))
+                        stdscr.addstr(row, 2, f"{s['type']} :{s['port']} (PID {s['pid']})"[:width-3])
+                        row += 1
+                else:
+                    stdscr.attron(curses.A_DIM)
+                    stdscr.addstr(row, 0, "  No servers running")
+                    stdscr.attroff(curses.A_DIM)
+                    row += 1
+                row += 1
+
+                # Listeners section
+                stdscr.attron(curses.color_pair(4) | curses.A_BOLD)
+                stdscr.addstr(row, 0, "Listeners")
+                stdscr.attroff(curses.color_pair(4) | curses.A_BOLD)
+                row += 1
+                stdscr.addstr(row, 0, "─" * min(40, width-1))
+                row += 1
+
+                if listeners:
+                    for l in listeners:
+                        stdscr.attron(curses.color_pair(2))
+                        stdscr.addstr(row, 0, f"◉ ")
+                        stdscr.attroff(curses.color_pair(2))
+                        stdscr.addstr(row, 2, f"{l['type']} :{l['port']} ({l['status']})"[:width-3])
+                        row += 1
+                else:
+                    stdscr.attron(curses.A_DIM)
+                    stdscr.addstr(row, 0, "  No listeners active")
+                    stdscr.attroff(curses.A_DIM)
+                    row += 1
+                row += 1
+
+                # Connections section
+                stdscr.attron(curses.color_pair(1) | curses.A_BOLD)
+                stdscr.addstr(row, 0, "Active Connections")
+                stdscr.attroff(curses.color_pair(1) | curses.A_BOLD)
+                row += 1
+                stdscr.addstr(row, 0, "─" * min(40, width-1))
+                row += 1
+
+                if connections:
+                    for c in connections:
+                        stdscr.attron(curses.color_pair(3) | curses.A_BOLD)
+                        stdscr.addstr(row, 0, f"★ ")
+                        stdscr.attroff(curses.color_pair(3) | curses.A_BOLD)
+                        stdscr.addstr(row, 2, f"{c['remote']} -> {c['local']}"[:width-3])
+                        row += 1
+                else:
+                    stdscr.attron(curses.A_DIM)
+                    stdscr.addstr(row, 0, "  No active connections")
+                    stdscr.attroff(curses.A_DIM)
+                    row += 1
+                row += 1
+
+                # Sliver Sessions section
+                stdscr.attron(curses.color_pair(3) | curses.A_BOLD)
+                stdscr.addstr(row, 0, "Sliver Sessions")
+                stdscr.attroff(curses.color_pair(3) | curses.A_BOLD)
+                row += 1
+                stdscr.addstr(row, 0, "─" * min(40, width-1))
+                row += 1
+
+                if sliver_sessions:
+                    for s in sliver_sessions:
+                        stdscr.attron(curses.color_pair(3) | curses.A_BOLD)
+                        stdscr.addstr(row, 0, f"★ ")
+                        stdscr.attroff(curses.color_pair(3) | curses.A_BOLD)
+                        info = f"{s['name']} | {s['user']}@{s['hostname']} ({s['remote']})"
+                        stdscr.addstr(row, 2, info[:width-3])
+                        row += 1
+                else:
+                    stdscr.attron(curses.A_DIM)
+                    stdscr.addstr(row, 0, "  No Sliver sessions")
+                    stdscr.attroff(curses.A_DIM)
+                    row += 1
+                row += 1
+
+                # Ligolo Pivots section
+                ligolo_pivots = self._detect_ligolo_pivots()
+                if ligolo_pivots:
+                    stdscr.attron(curses.color_pair(6) | curses.A_BOLD)
+                    stdscr.addstr(row, 0, "Ligolo Pivots")
+                    stdscr.attroff(curses.color_pair(6) | curses.A_BOLD)
+                    row += 1
+                    stdscr.addstr(row, 0, "─" * min(40, width-1))
+                    row += 1
+
+                    for p in ligolo_pivots:
+                        if p['type'] == 'agent':
+                            # Connected agent - green
+                            stdscr.attron(curses.color_pair(3) | curses.A_BOLD)
+                            stdscr.addstr(row, 0, f"● ")
+                            stdscr.attroff(curses.color_pair(3) | curses.A_BOLD)
+                            stdscr.addstr(row, 2, f"Agent: {p['network']} (:{p['interface']})"[:width-3])
+                        elif p['type'] == 'route':
+                            # Route - cyan
+                            stdscr.attron(curses.color_pair(2))
+                            stdscr.addstr(row, 0, f"⇄ ")
+                            stdscr.attroff(curses.color_pair(2))
+                            stdscr.addstr(row, 2, f"Route: {p['network']}"[:width-3])
+                        else:
+                            # Proxy status - yellow/dim
+                            stdscr.attron(curses.color_pair(4))
+                            stdscr.addstr(row, 0, f"◌ ")
+                            stdscr.attroff(curses.color_pair(4))
+                            stdscr.addstr(row, 2, f"Proxy :{p['interface']} ({p['network']})"[:width-3])
+                        row += 1
+                    row += 1
+
+                # Event Log section (bottom)
+                if row < height - 5:
+                    stdscr.attron(curses.color_pair(2) | curses.A_BOLD)
+                    stdscr.addstr(row, 0, "Event Log")
+                    stdscr.attroff(curses.color_pair(2) | curses.A_BOLD)
+                    row += 1
+                    stdscr.addstr(row, 0, "─" * min(40, width-1))
+                    row += 1
+
+                    # Show last few events
+                    events = self._read_events()
+                    max_events = height - row - 2
+                    for event in events[-max_events:]:
+                        if row >= height - 1:
+                            break
+                        event_time = event.get('time', '')
+                        event_type = event.get('type', 'info')
+                        event_msg = event.get('message', '')[:width-12]
+
+                        if event_type == 'connection':
+                            stdscr.attron(curses.color_pair(3))
+                        elif event_type == 'error':
+                            stdscr.attron(curses.color_pair(5))
+                        else:
+                            stdscr.attron(curses.color_pair(2))
+
+                        stdscr.addstr(row, 0, f"[{event_time}] {event_msg}"[:width-1])
+                        stdscr.attroff(curses.color_pair(1) | curses.color_pair(2) | curses.color_pair(3) | curses.color_pair(5))
+                        row += 1
+
+                # Footer
+                stdscr.attron(curses.A_DIM)
+                stdscr.addstr(height-1, 0, f" Last update: {now} | Press 'q' to quit "[:width-1])
+                stdscr.attroff(curses.A_DIM)
+
+                stdscr.refresh()
+
+                # Check for quit
+                key = stdscr.getch()
+                if key == ord('q') or key == ord('Q'):
+                    self.running = False
+
+            except KeyboardInterrupt:
+                break
+            except curses.error:
+                pass
+            except Exception as e:
+                # Fall back to simple mode on error
+                self.running = False
+
+
+def main():
+    """Main entry point"""
+    import argparse
+    parser = argparse.ArgumentParser(description="UwU Toolkit Dashboard")
+    parser.add_argument("-s", "--simple", action="store_true",
+                       help="Use simple mode (no curses UI)")
+    args = parser.parse_args()
+
+    dashboard = Dashboard()
+
+    if args.simple:
+        dashboard.run_simple()
+    else:
+        try:
+            curses.wrapper(dashboard.run_curses)
+        except Exception:
+            # Fall back to simple mode
+            print("Falling back to simple mode...")
+            dashboard.run_simple()
+
+
+if __name__ == "__main__":
+    main()

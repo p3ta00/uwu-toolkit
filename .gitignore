@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Engagement-specific data (keep dirs, ignore contents)
+loot/*
+!loot/.gitkeep
+logs/*
+!logs/.gitkeep
+reports/*
+!reports/.gitkeep
+writeups/*
+!writeups/.gitkeep
+
+# Scan results
+scan_results/
+nmap_results/
+powerview_results/
+
+# Generated files
+_site/
+*.dmp
+*.zip
+*.bin
+*.enc
+*.b64
+
+# Credentials and secrets
+*.cfg
+*.ccache
+ligolo-ng.yaml
+sliver-client/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Ruby/Jekyll
+.bundle/
+Gemfile.lock
