@@ -183,18 +183,25 @@ PYTHON_PACKAGES=(
     "rich"
     "requests"
     "pyyaml"
+    "donut"
 )
 
 # Check Python packages
 print_status "Checking Python packages..."
 MISSING_PY_PKGS=()
 
+# Package name mapping (import_name:pip_package)
+declare -A PY_PKG_MAP
+PY_PKG_MAP["donut"]="donut-shellcode"
+
 for pkg in "${PYTHON_PACKAGES[@]}"; do
     if python3 -c "import $pkg" 2>/dev/null; then
         print_good "Python: $pkg"
     else
         print_error "Python: $pkg not found"
-        MISSING_PY_PKGS+=("$pkg")
+        # Use mapped package name if available, otherwise use import name
+        pip_pkg="${PY_PKG_MAP[$pkg]:-$pkg}"
+        MISSING_PY_PKGS+=("$pip_pkg")
     fi
 done
 
@@ -305,6 +312,7 @@ PENTEST_TOOLS=(
     "impacket-smbclient:Impacket"
     "ligolo-proxy:Ligolo-ng"
     "rusthound:RustHound"
+    "donut:Donut (shellcode generator)"
 )
 
 print_status "Checking pentesting tools..."
