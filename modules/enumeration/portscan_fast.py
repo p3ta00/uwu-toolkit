@@ -1,10 +1,10 @@
 """
 Fast Port Scanner - Two-Phase Scanning
-Phase 1: Fast discovery using masscan or nmap with high rate
+Phase 1: Fast discovery using rustscan, masscan, or nmap with high rate
 Phase 2: Detailed enumeration of discovered ports with nmap -sCV
 
 Based on methodology from top pentesters (OSCP, HTB):
-- RustScan/Masscan for speed -> Nmap for detail
+- RustScan (preferred) / Masscan for speed -> Nmap for detail
 - DivideAndScan approach
 """
 
@@ -35,7 +35,7 @@ class FastPortScanner(ModuleBase):
         self.author = "UwU Toolkit"
         self.module_type = ModuleType.ENUMERATION
         self.platform = Platform.NETWORK
-        self.tags = ["network", "scanner", "enumeration", "nmap", "masscan", "recon", "ports"]
+        self.tags = ["network", "scanner", "enumeration", "nmap", "masscan", "rustscan", "recon", "ports"]
 
         # Register options
         self.register_option("RHOSTS", "Target host(s) - single IP or CIDR", required=True)
@@ -46,7 +46,7 @@ class FastPortScanner(ModuleBase):
         self.register_option("RATE", "Packets per second for fast scan", default="1000")
         self.register_option("SCANNER", "Fast scanner to use",
                            default="auto",
-                           choices=["auto", "masscan", "nmap"])
+                           choices=["auto", "rustscan", "masscan", "nmap"])
         self.register_option("ENUMERATE", "Run service enumeration after discovery",
                            default="yes", choices=["yes", "no"])
         self.register_option("UDP", "Include UDP scan (top 20 ports)",
@@ -122,7 +122,9 @@ class FastPortScanner(ModuleBase):
         return True
 
     def _detect_scanner(self) -> str:
-        """Detect available fast scanner"""
+        """Detect available fast scanner - prefer rustscan > masscan > nmap"""
+        if shutil.which("rustscan"):
+            return "rustscan"
         if shutil.which("masscan"):
             return "masscan"
         return "nmap"
@@ -144,7 +146,9 @@ class FastPortScanner(ModuleBase):
 
         output_file = f"{output_dir}/{target.replace('/', '_')}_{timestamp}_discovery"
 
-        if scanner == "masscan":
+        if scanner == "rustscan":
+            open_ports = self._run_rustscan(target, port_range, rate, output_file)
+        elif scanner == "masscan":
             open_ports = self._run_masscan(target, port_range, rate, output_file)
         else:
             open_ports = self._run_nmap_fast(target, port_range, rate, scan_type, output_file)
@@ -187,6 +191,63 @@ class FastPortScanner(ModuleBase):
             return set()
         except Exception as e:
             self.print_error(f"Masscan error: {e}")
+            return set()
+
+    def _run_rustscan(self, target: str, port_range: str, rate: str, output_file: str) -> Set[int]:
+        """Run rustscan for fast port discovery"""
+
+        cmd = ["rustscan", "--addresses", target, "--batch-size", "4500", "--timeout", "3000"]
+
+        # Add port range if specified
+        if port_range and port_range != "1-65535":
+            cmd.extend(["--ports", port_range])
+
+        # Add rate limiting
+        cmd.extend(["--ulimit", rate])
+
+        # Disable nmap follow-up (we do our own Phase 2)
+        cmd.append("--")
+        cmd.append("-Pn")
+        cmd.append("-sS")
+
+        self.print_status(f"Command: {' '.join(cmd)}")
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+            # Parse rustscan output for open ports
+            open_ports: Set[int] = set()
+
+            # Rustscan outputs "Open IP:PORT" format
+            for line in result.stdout.split('\n'):
+                # Match "Open X.X.X.X:PORT" pattern
+                if line.strip().startswith("Open "):
+                    match = re.search(r':(\d+)$', line.strip())
+                    if match:
+                        port = int(match.group(1))
+                        open_ports.add(port)
+                        self.print_status(f"Found open port: {port}/tcp")
+                # Also match raw port discovery output
+                elif re.match(r'^Open \d+\.\d+\.\d+\.\d+:\d+', line):
+                    match = re.search(r':(\d+)', line)
+                    if match:
+                        port = int(match.group(1))
+                        open_ports.add(port)
+                        self.print_status(f"Found open port: {port}/tcp")
+
+            # Save discovered ports to file
+            with open(f"{output_file}.rustscan", "w") as f:
+                f.write(f"# Rustscan results for {target}\n")
+                f.write(result.stdout)
+                f.write(f"\n# Open ports: {','.join(map(str, sorted(open_ports)))}\n")
+
+            return open_ports
+
+        except subprocess.TimeoutExpired:
+            self.print_error("Rustscan timed out")
+            return set()
+        except Exception as e:
+            self.print_error(f"Rustscan error: {e}")
             return set()
 
     def _run_nmap_fast(self, target: str, port_range: Optional[str], rate: str,
@@ -393,4 +454,13 @@ class FastPortScanner(ModuleBase):
         if not shutil.which("nmap"):
             self.print_error("nmap not found")
             return False
+
+        # Check for fast scanners (optional but recommended)
+        if shutil.which("rustscan"):
+            self.print_status("rustscan found (preferred fast scanner)")
+        elif shutil.which("masscan"):
+            self.print_status("masscan found (fast scanner)")
+        else:
+            self.print_warning("No fast scanner (rustscan/masscan) found, using nmap --min-rate")
+
         return True
