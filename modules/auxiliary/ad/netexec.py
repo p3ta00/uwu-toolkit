@@ -118,7 +118,8 @@ class NetExec(ModuleBase):
             cmd_parts.extend(["--aes-key", password])
         else:
             if password:
-                cmd_parts.extend(["-p", password])
+                # Quote password to handle special characters
+                cmd_parts.extend(["-p", f"'{password}'"])
             else:
                 cmd_parts.extend(["-p", "''"])  # Empty string for null session
 

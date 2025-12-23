@@ -98,7 +98,8 @@ class BloodHoundCollector(ModuleBase):
                 if len(password) == 32 and all(c in '0123456789abcdefABCDEF' for c in password):
                     cmd_parts.extend(["--hashes", f":{password}"])
                 else:
-                    cmd_parts.extend(["-p", password])
+                    # Quote password to handle special characters
+                    cmd_parts.extend(["-p", f"'{password}'"])
 
         cmd_parts.extend(["-d", domain])
         cmd_parts.extend(["-dc", dc_ip])
