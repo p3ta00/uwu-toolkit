@@ -629,10 +629,14 @@ sys.exit(1)
         """Start Responder in the background"""
         self.print_status(f"Starting Responder on {interface}...")
 
-        # Check if Responder is already running
-        ret, stdout, stderr = self.run_in_exegol("pgrep -f 'Responder.py'", timeout=5)
-        if ret == 0 and stdout.strip():
+        # Check if Responder is already running (more robust check)
+        ret, stdout, stderr = self.run_in_exegol(
+            "ps aux | grep -E 'Responder\\.py.*-I' | grep -v grep | head -1",
+            timeout=5
+        )
+        if ret == 0 and stdout.strip() and 'Responder.py' in stdout:
             self.print_warning("Responder is already running")
+            self.print_line(f"  {stdout.strip()[:80]}")
             return True
 
         # Start Responder in background
@@ -640,15 +644,23 @@ sys.exit(1)
         ret, stdout, stderr = self.run_in_exegol(responder_cmd, timeout=10)
 
         # Give it a moment to start
-        time.sleep(2)
+        time.sleep(3)
 
         # Verify it started
-        ret, stdout, stderr = self.run_in_exegol("pgrep -f 'Responder.py'", timeout=5)
-        if ret == 0 and stdout.strip():
+        ret, stdout, stderr = self.run_in_exegol(
+            "ps aux | grep -E 'Responder\\.py.*-I' | grep -v grep",
+            timeout=5
+        )
+        if ret == 0 and stdout.strip() and 'Responder.py' in stdout:
             self.print_good("Responder started successfully")
             return True
         else:
-            self.print_error("Failed to start Responder")
+            # Check log for errors
+            ret, log, _ = self.run_in_exegol("tail -5 /tmp/responder.log 2>/dev/null", timeout=5)
+            if log:
+                self.print_error(f"Responder failed: {log.strip()}")
+            else:
+                self.print_error("Failed to start Responder")
             return False
 
     def _start_hash_monitor(self):
@@ -787,8 +799,11 @@ sys.exit(1)
         """Stop Responder and cleanup"""
         self._stop_monitoring = True
 
-        # Check if we started Responder (don't kill if it was already running)
-        ret, stdout, stderr = self.run_in_exegol("pkill -f 'Responder.py' 2>/dev/null || true", timeout=5)
+        # Kill Responder processes we started
+        ret, stdout, stderr = self.run_in_exegol(
+            "pkill -f 'Responder.py.*-I' 2>/dev/null; rm -f /tmp/responder.log 2>/dev/null; true",
+            timeout=5
+        )
         self.print_status("Responder stopped")
 
     def check(self) -> bool:
