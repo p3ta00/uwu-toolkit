@@ -75,13 +75,22 @@ class SecretsDump(ModuleBase):
         self.print_line()
 
         # Build command based on auth type
+        # If local auth or no domain, omit domain prefix entirely
+        use_domain = domain and domain != "." and local_auth != "yes"
+
         if auth_type == "hash":
             # Pass-the-hash authentication
-            auth_string = f"'{domain}/{user}@{target}'"
+            if use_domain:
+                auth_string = f"'{domain}/{user}@{target}'"
+            else:
+                auth_string = f"'{user}@{target}'"
             hash_part = f"-hashes :{password}"
         else:
             # Password authentication - quote password for special chars
-            auth_string = f"{domain}/{user}:'{password}'@{target}"
+            if use_domain:
+                auth_string = f"{domain}/{user}:'{password}'@{target}"
+            else:
+                auth_string = f"{user}:'{password}'@{target}"
             hash_part = ""
 
         # Build method flags
