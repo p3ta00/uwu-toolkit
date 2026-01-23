@@ -89,6 +89,10 @@ class NetExec(ModuleBase):
         self.register_option("GENERATE_HOSTS", "Generate /etc/hosts entries from discovered hosts",
                            default="no", choices=["yes", "no"])
 
+        # LAPS options
+        self.register_option("LAPS_ADMIN", "Custom LAPS admin account name (default: administrator)", default="")
+        self.register_option("LAPS_COMPUTER", "Computer filter for LDAP LAPS module (e.g., WIN-*, DC01)", default="")
+
     def run(self) -> bool:
         target = self.get_option("RHOSTS")
         domain = self.get_option("DOMAIN")
@@ -288,7 +292,21 @@ class NetExec(ModuleBase):
         elif action == "ntds":
             args.append("--ntds")
         elif action == "laps":
-            args.append("--laps")
+            protocol = self.get_option("PROTOCOL")
+            laps_admin = self.get_option("LAPS_ADMIN")
+            laps_computer = self.get_option("LAPS_COMPUTER")
+
+            if protocol == "ldap":
+                # Use LDAP -M laps module for reading LAPS passwords
+                args.extend(["-M", "laps"])
+                if laps_computer:
+                    args.extend(["-o", f"COMPUTER={laps_computer}"])
+            else:
+                # SMB --laps for authentication with LAPS password
+                if laps_admin:
+                    args.extend(["--laps", laps_admin])
+                else:
+                    args.append("--laps")
         elif action == "gmsa":
             args.append("--gmsa")
         elif action == "dpapi":
