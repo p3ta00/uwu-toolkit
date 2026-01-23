@@ -186,9 +186,10 @@ class BloodHoundCollector(ModuleBase):
 
         cmd = " ".join(shell_parts)
 
-        # Run in Exegol (bloodhound-ce.py is typically in Exegol)
+        # Run in Exegol from the output directory so files are saved there
         self.print_status("Running bloodhound-ce.py in Exegol...")
-        ret, stdout, stderr = self.run_in_exegol(cmd, timeout=600)
+        full_cmd = f"cd {output_dir} && {cmd}"
+        ret, stdout, stderr = self.run_in_exegol(full_cmd, timeout=600)
         output_text = stdout + stderr
 
         # Parse output
@@ -197,8 +198,15 @@ class BloodHoundCollector(ModuleBase):
         if ret == 0 or "done" in output_text.lower() or "written" in output_text.lower():
             self.print_line()
             self.print_good("BloodHound collection completed!")
+
+            # Find and display the output file
             if do_zip:
-                self.print_status(f"ZIP file saved - check current directory")
+                ret2, zip_files, _ = self.run_in_exegol(f"ls -t {output_dir}/*bloodhound*.zip 2>/dev/null | head -1", timeout=10)
+                if zip_files and zip_files.strip():
+                    self.print_good(f"ZIP file: {zip_files.strip()}")
+                else:
+                    self.print_status(f"ZIP file saved to: {output_dir}/")
+
             self.print_status("Import the output into BloodHound CE for analysis")
             return True
         else:
