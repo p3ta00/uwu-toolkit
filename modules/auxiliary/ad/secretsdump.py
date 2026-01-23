@@ -28,7 +28,7 @@ class SecretsDump(ModuleBase):
         ]
 
         # Core options
-        self.register_option("RHOSTS", "Target host IP (Domain Controller for DCSync)", required=True)
+        self.register_option("RHOSTS", "Target host IP (DC for DCSync, any host for standard/sam/lsa)", required=True)
         self.register_option("DOMAIN", "Domain name", required=True)
         self.register_option("USER", "Username with admin/replication rights", required=True)
         self.register_option("PASS", "Password or NTLM hash", required=True)
@@ -39,14 +39,12 @@ class SecretsDump(ModuleBase):
 
         # Method options
         self.register_option("METHOD", "Dump method",
-                           default="dcsync", choices=["dcsync", "all", "sam", "lsa", "ntds"])
+                           default="standard", choices=["standard", "dcsync", "sam", "lsa", "ntds"])
         self.register_option("JUST_DC_USER", "DCSync specific user only", default="")
 
         # Output
         self.register_option("OUTPUT", "Output file prefix", default="secretsdump_output")
 
-        # Container
-        self.register_option("EXEGOL_CONTAINER", "Exegol container (auto-detect if empty)", default="")
 
     def run(self) -> bool:
         target = self.get_option("RHOSTS")
@@ -79,7 +77,10 @@ class SecretsDump(ModuleBase):
 
         # Build method flags
         method_flags = ""
-        if method == "dcsync":
+        if method == "standard":
+            # No flags - dumps SAM, LSA secrets, and cached creds automatically
+            pass
+        elif method == "dcsync":
             method_flags = "-just-dc"
             if just_dc_user:
                 method_flags += f" -just-dc-user '{just_dc_user}'"
@@ -89,7 +90,6 @@ class SecretsDump(ModuleBase):
             method_flags = "-lsa"
         elif method == "ntds":
             method_flags = "-ntds"
-        # "all" has no flags - dumps everything
 
         # Build full command
         cmd = f"secretsdump.py {auth_string}"
