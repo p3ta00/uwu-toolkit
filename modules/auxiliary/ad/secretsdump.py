@@ -80,8 +80,8 @@ class SecretsDump(ModuleBase):
             auth_string = f"'{domain}/{user}@{target}'"
             hash_part = f"-hashes :{password}"
         else:
-            # Password authentication
-            auth_string = f"'{domain}/{user}:{password}@{target}'"
+            # Password authentication - quote password for special chars
+            auth_string = f"{domain}/{user}:'{password}'@{target}"
             hash_part = ""
 
         # Build method flags
