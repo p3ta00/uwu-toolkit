@@ -29,9 +29,10 @@ class SecretsDump(ModuleBase):
 
         # Core options
         self.register_option("RHOSTS", "Target host IP (DC for DCSync, any host for standard/sam/lsa)", required=True)
-        self.register_option("DOMAIN", "Domain name", required=True)
+        self.register_option("DOMAIN", "Domain name (use '.' for local auth)", default=".")
         self.register_option("USER", "Username with admin/replication rights", required=True)
         self.register_option("PASS", "Password or NTLM hash", required=True)
+        self.register_option("LOCAL_AUTH", "Use local authentication", default="no", choices=["yes", "no"])
 
         # Authentication type
         self.register_option("AUTH_TYPE", "Authentication type",
@@ -55,9 +56,17 @@ class SecretsDump(ModuleBase):
         method = self.get_option("METHOD")
         just_dc_user = self.get_option("JUST_DC_USER")
         output = self.get_option("OUTPUT")
+        local_auth = self.get_option("LOCAL_AUTH")
+
+        # Use '.' for local authentication
+        if local_auth == "yes":
+            domain = "."
 
         self.print_status(f"Target: {target}")
-        self.print_status(f"Domain: {domain}")
+        if local_auth == "yes":
+            self.print_status("Auth: Local")
+        else:
+            self.print_status(f"Domain: {domain}")
         self.print_status(f"User: {user}")
         self.print_status(f"Auth Type: {auth_type}")
         self.print_status(f"Method: {method}")
