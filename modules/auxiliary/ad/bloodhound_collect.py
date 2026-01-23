@@ -283,14 +283,25 @@ class BloodHoundCollector(ModuleBase):
 
         # Try local first, then Exegol
         rh_path = find_tool("rusthound")
-        if rh_path:
-            self.print_status("Using local RustHound")
-            ret, stdout, stderr = self.run_command(cmd_parts, timeout=600)
-            output_text = stdout + stderr
-        else:
-            self.print_status("Using Exegol container for RustHound")
-            ret, stdout, stderr = self.run_in_exegol(cmd, timeout=600)
-            output_text = stdout + stderr
+
+        def run_rusthound(parts, cmd_str):
+            if rh_path:
+                self.print_status("Using local RustHound")
+                ret, stdout, stderr = self.run_command(parts, timeout=600)
+            else:
+                self.print_status("Using Exegol container for RustHound")
+                ret, stdout, stderr = self.run_in_exegol(cmd_str, timeout=600)
+            return ret, stdout + stderr
+
+        ret, output_text = run_rusthound(cmd_parts, cmd)
+
+        # Check if LDAP signing is required and retry with LDAPS
+        if "strongerAuthRequired" in output_text or "integrity checking" in output_text.lower():
+            if not use_ldaps:
+                self.print_warning("LDAP signing required - retrying with LDAPS...")
+                cmd_parts.insert(cmd_parts.index("--dns-tcp"), "--ldaps")
+                cmd = " ".join(cmd_parts)
+                ret, output_text = run_rusthound(cmd_parts, cmd)
 
         # Parse and display output
         self._parse_rusthound_output(output_text)
