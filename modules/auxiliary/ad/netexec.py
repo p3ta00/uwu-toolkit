@@ -33,8 +33,8 @@ class NetExec(ModuleBase):
         # Core options
         self.register_option("RHOSTS", "Target host(s) - IP, range, or CIDR", required=True)
         self.register_option("DOMAIN", "Domain name", default="")
-        self.register_option("USER", "Username (empty for null session)", default="")
-        self.register_option("PASS", "Password, hash, or password file", default="")
+        self.register_option("USER", "Username or user file (one per line)", default="")
+        self.register_option("PASS", "Password, hash, or password file (one per line)", default="")
 
         # Authentication options
         self.register_option("AUTH_TYPE", "Authentication type",
@@ -49,7 +49,8 @@ class NetExec(ModuleBase):
                            default="check",
                            choices=["check", "shares", "users", "groups", "sessions",
                                    "disks", "loggedon", "localgroups", "pass-pol",
-                                   "rid-brute", "spider", "execute", "sam", "lsa", "ntds"])
+                                   "rid-brute", "spider", "execute", "sam", "lsa", "ntds",
+                                   "laps", "gmsa", "dpapi", "bloodhound"])
 
         # Execution options (for ACTION=execute)
         self.register_option("EXEC_TYPE", "Execution type: cmd (-x) or powershell (-X)",
@@ -71,8 +72,6 @@ class NetExec(ModuleBase):
         # Output
         self.register_option("OUTPUT", "Output file for results", default="")
 
-        # Container
-        self.register_option("EXEGOL_CONTAINER", "Exegol container name (auto-detect if empty)", default="")
 
         # RDP options
         self.register_option("RDP_CONFIRM", "Auto-confirm RDP execution prompt",
@@ -81,6 +80,14 @@ class NetExec(ModuleBase):
         # Streaming output
         self.register_option("STREAM", "Stream output in real-time",
                            default="yes", choices=["yes", "no"])
+
+        # Continue on success (for spraying)
+        self.register_option("CONTINUE_ON_SUCCESS", "Continue after finding valid creds",
+                           default="no", choices=["yes", "no"])
+
+        # Generate /etc/hosts entries
+        self.register_option("GENERATE_HOSTS", "Generate /etc/hosts entries from discovered hosts",
+                           default="no", choices=["yes", "no"])
 
     def run(self) -> bool:
         target = self.get_option("RHOSTS")
@@ -107,6 +114,32 @@ class NetExec(ModuleBase):
         cmd_parts = ["NetExec", protocol, target]
 
         # Add authentication (support null/guest/anonymous sessions)
+        # Check if user/pass are files (for spraying)
+        # Uses WORKING_DIR from config (set with: setp WORKING_DIR /workspace)
+        file_extensions = ('.txt', '.lst', '.list', '.users', '.passwords', '.wordlist')
+
+        def resolve_file_path(val):
+            """Check if value is a file and resolve path using WORKING_DIR"""
+            if not val:
+                return val, False
+            # Check common file extensions for wordlists
+            if val.lower().endswith(file_extensions):
+                # Use config's resolve_path which respects WORKING_DIR
+                resolved = self._config.resolve_path(val) if self._config else val
+                return resolved, True
+            # Already absolute path
+            if val.startswith('/'):
+                return val, True
+            return val, False
+
+        user, user_is_file = resolve_file_path(user)
+        password, pass_is_file = resolve_file_path(password)
+
+        if user_is_file:
+            self.print_status(f"Using user file: {user}")
+        if pass_is_file:
+            self.print_status(f"Using password file: {password}")
+
         if user:
             cmd_parts.extend(["-u", user])
         else:
@@ -118,14 +151,21 @@ class NetExec(ModuleBase):
             cmd_parts.extend(["--aes-key", password])
         else:
             if password:
-                # Quote password to handle special characters
-                cmd_parts.extend(["-p", f"'{password}'"])
+                # Don't quote if it's a file path, otherwise quote for special chars
+                if pass_is_file:
+                    cmd_parts.extend(["-p", password])
+                else:
+                    cmd_parts.extend(["-p", f"'{password}'"])
             else:
                 cmd_parts.extend(["-p", "''"])  # Empty string for null session
 
         # Add domain if specified
         if domain:
             cmd_parts.extend(["-d", domain])
+
+        # Continue on success (find all valid creds, not just first)
+        if self.get_option("CONTINUE_ON_SUCCESS") == "yes":
+            cmd_parts.append("--continue-on-success")
 
         # Build action-specific arguments
         action_args = self._build_action_args(action)
@@ -137,7 +177,14 @@ class NetExec(ModuleBase):
             cmd_parts.extend(["-M", nxc_module])
             module_opts = self.get_option("NXC_MODULE_OPTIONS")
             if module_opts:
-                cmd_parts.extend(["-o", module_opts])
+                # Parse options - support both comma and space separated
+                # Also handle if user included -o in the value
+                opts_clean = module_opts.replace(" -o ", " ").replace("-o ", "")
+                # Split by comma or whitespace (nxc wants: -o OPT1=VAL1 OPT2=VAL2)
+                opt_pairs = [o.strip() for o in re.split(r'[,\s]+', opts_clean) if o.strip() and '=' in o.strip()]
+                if opt_pairs:
+                    cmd_parts.append("-o")
+                    cmd_parts.extend(opt_pairs)
 
         # Execute in Exegol
         cmd = " ".join(cmd_parts)
@@ -168,6 +215,17 @@ class NetExec(ModuleBase):
                 self.print_good(f"Output saved to: {output_file}")
             except Exception as e:
                 self.print_warning(f"Could not save output: {e}")
+
+        # Generate /etc/hosts entries if requested
+        if self.get_option("GENERATE_HOSTS") == "yes":
+            # For streaming mode, we need to capture output differently
+            if self.get_option("STREAM") == "yes":
+                # Re-run quietly to capture output for parsing
+                ret2, stdout2, stderr2 = self.run_in_exegol(cmd, quiet=True)
+                hosts_output = stdout2 + stderr2
+            else:
+                hosts_output = output
+            self._generate_hosts_entries(hosts_output, target)
 
         # Determine success based on output
         if "[+]" in output or "Pwn3d!" in output:
@@ -229,6 +287,16 @@ class NetExec(ModuleBase):
             args.append("--lsa")
         elif action == "ntds":
             args.append("--ntds")
+        elif action == "laps":
+            args.append("--laps")
+        elif action == "gmsa":
+            args.append("--gmsa")
+        elif action == "dpapi":
+            args.append("--dpapi")
+        elif action == "bloodhound":
+            args.append("--bloodhound")
+            args.append("-c")
+            args.append("All")
 
         return args
 
@@ -258,6 +326,83 @@ class NetExec(ModuleBase):
                 self.print_good(f"📁 {line}")
             else:
                 self.print_line(f"    {line}")
+
+    def _generate_hosts_entries(self, output: str, target: str) -> None:
+        """Parse NetExec output and generate /etc/hosts entries"""
+        import re
+
+        hosts_entries = []
+        seen = set()
+
+        # Pattern to match NetExec SMB/LDAP output lines
+        # Example: SMB  10.1.61.93  445  DC01  Windows... (name:DC01) (domain:BUILDINGMAGIC.LOCAL)
+        for line in output.split('\n'):
+            # Extract IP address from the line
+            ip_match = re.search(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})', line)
+            if not ip_match:
+                continue
+            ip = ip_match.group(1)
+
+            # Extract hostname from (name:HOSTNAME) pattern
+            name_match = re.search(r'\(name:([^)]+)\)', line)
+            hostname = name_match.group(1) if name_match else None
+
+            # Extract domain from (domain:DOMAIN) pattern
+            domain_match = re.search(r'\(domain:([^)]+)\)', line)
+            domain = domain_match.group(1) if domain_match else None
+
+            if not hostname and not domain:
+                continue
+
+            # Build unique key to avoid duplicates
+            key = f"{ip}:{hostname}:{domain}"
+            if key in seen:
+                continue
+            seen.add(key)
+
+            # Build hosts entry
+            names = []
+            if hostname:
+                names.append(hostname)
+                if domain:
+                    # Add FQDN
+                    fqdn = f"{hostname}.{domain}"
+                    names.append(fqdn)
+            if domain:
+                # Add domain itself (useful for DC)
+                names.append(domain)
+
+            if names:
+                entry = f"{ip}\t{' '.join(names)}"
+                hosts_entries.append(entry)
+
+        if not hosts_entries:
+            self.print_warning("No hosts discovered to add")
+            return
+
+        # Display the entries
+        self.print_line()
+        self.print_good("Generated /etc/hosts entries:")
+        self.print_line()
+        for entry in hosts_entries:
+            print(f"  {entry}")
+        self.print_line()
+
+        # Ask to append to /etc/hosts
+        try:
+            confirm = input("[?] Append to /etc/hosts? [Y/n]: ").strip().lower()
+            if confirm != 'n':
+                with open('/etc/hosts', 'a') as f:
+                    f.write(f"\n# Added by UwU Toolkit - {target}\n")
+                    for entry in hosts_entries:
+                        f.write(f"{entry}\n")
+                self.print_good("Entries added to /etc/hosts")
+        except PermissionError:
+            self.print_error("Permission denied. Run with sudo or manually add:")
+            for entry in hosts_entries:
+                print(f"  echo '{entry}' | sudo tee -a /etc/hosts")
+        except Exception as e:
+            self.print_error(f"Could not write to /etc/hosts: {e}")
 
     def check(self) -> bool:
         """Verify NetExec is available in Exegol"""
