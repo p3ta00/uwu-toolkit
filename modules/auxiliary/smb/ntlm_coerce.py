@@ -95,6 +95,13 @@ class NTLMCoerce(ModuleBase):
             success = self._run_ntlm_theft(lhost, filename, file_type, output_dir)
             if not success:
                 return False
+
+            # Also generate CVE-2025-24054 payloads when using "all"
+            if file_type == "all":
+                self.print_line()
+                self.print_status("Also generating CVE-2025-24054 / CVE-2025-24071 payloads...")
+                self._generate_cve_2025_24054(lhost, filename, output_dir, share_name)
+
             generated = self._list_generated_files(output_dir, filename)
 
         if not generated:
