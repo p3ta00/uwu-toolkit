@@ -40,6 +40,8 @@ class NetExec(ModuleBase):
         self.register_option("AUTH_TYPE", "Authentication type",
                            default="password",
                            choices=["password", "hash", "aesKey"])
+        self.register_option("LOCAL_AUTH", "Use local authentication instead of domain",
+                           default="no", choices=["yes", "no"])
         self.register_option("PROTOCOL", "Protocol to use",
                            default="smb",
                            choices=["smb", "ldap", "winrm", "rdp", "mssql", "ssh", "wmi"])
@@ -112,6 +114,8 @@ class NetExec(ModuleBase):
         self.print_status(f"User: {user if user else '(null session)'}")
         self.print_status(f"Protocol: {protocol.upper()}")
         self.print_status(f"Action: {action}")
+        if self.get_option("LOCAL_AUTH") == "yes":
+            self.print_status("Auth: Local (--local-auth)")
         self.print_line()
 
         # Build base command
@@ -166,6 +170,10 @@ class NetExec(ModuleBase):
         # Add domain if specified
         if domain:
             cmd_parts.extend(["-d", domain])
+
+        # Local authentication (for local accounts like LAPS)
+        if self.get_option("LOCAL_AUTH") == "yes":
+            cmd_parts.append("--local-auth")
 
         # Continue on success (find all valid creds, not just first)
         if self.get_option("CONTINUE_ON_SUCCESS") == "yes":
