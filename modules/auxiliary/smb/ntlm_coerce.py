@@ -197,7 +197,8 @@ class NTLMCoerce(ModuleBase):
         cmd = f"{ntlm_theft_python} {ntlm_theft_script} --generate {gen_type} --server {lhost} --filename {filename}"
 
         # ntlm_theft outputs to current directory, so we cd first
-        full_cmd = f"cd {output_dir} && {cmd}"
+        # Pipe "Y" to auto-confirm overwrite prompts
+        full_cmd = f"cd {output_dir} && echo 'Y' | {cmd}"
 
         ret = self.run_in_exegol_stream(full_cmd, timeout=60)
 
