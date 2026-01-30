@@ -37,8 +37,6 @@ class CertipyFind(ModuleBase):
                            default="yes", choices=["yes", "no"])
         self.register_option("OUTPUT", "Output file prefix", default="certipy_output")
 
-        # Container
-        self.register_option("EXEGOL_CONTAINER", "Exegol container (auto-detect if empty)", default="")
 
     def run(self) -> bool:
         dc_ip = self.get_option("RHOSTS")

@@ -229,7 +229,6 @@ find / -name ".git" -type d 2>/dev/null | head -10
         self.register_option("SSH_KEY", "Path to SSH private key", default="")
         self.register_option("SECTIONS", "Sections to run (comma-separated or 'all')", default="all")
         self.register_option("LOOT_DIR", "Directory to save loot", default="~/.uwu-toolkit/loot")
-        self.register_option("EXEGOL_CONTAINER", "Exegol container name", default="")
         self.register_option("TIMEOUT", "Command timeout in seconds", default="300")
 
         # Results storage
@@ -266,7 +265,6 @@ find / -name ".git" -type d 2>/dev/null | head -10
 
     def _run_via_exegol(self, cmd: List[str], timeout: int = 60) -> Tuple[int, str, str]:
         """Run command via Exegol if configured"""
-        container = self.get_option("EXEGOL_CONTAINER")
         if container:
             full_cmd = ["docker", "exec", container] + cmd
         else:

@@ -64,7 +64,6 @@ class LinpeasEnum(ModuleBase):
         self.register_option("LINPEAS_ARGS", "Additional linpeas arguments", default="-a")
         self.register_option("REMOTE_PATH", "Remote path to upload linpeas", default="/tmp/linpeas.sh")
         self.register_option("LOOT_DIR", "Directory to save loot", default="~/.uwu-toolkit/loot")
-        self.register_option("EXEGOL_CONTAINER", "Exegol container name", default="")
         self.register_option("TIMEOUT", "Execution timeout in seconds", default="600")
 
         # Runtime
@@ -123,7 +122,6 @@ class LinpeasEnum(ModuleBase):
 
     def _run_via_exegol(self, cmd: List[str], timeout: int = 120) -> Tuple[int, str, str]:
         """Run command via Exegol container if configured"""
-        container = self.get_option("EXEGOL_CONTAINER")
         if container:
             docker_cmd = ["docker", "exec", container] + cmd
         else:
@@ -148,7 +146,6 @@ class LinpeasEnum(ModuleBase):
         local_path = self.get_option("LINPEAS_PATH")
         remote_path = self.get_option("REMOTE_PATH")
 
-        container = self.get_option("EXEGOL_CONTAINER")
         if container:
             # Try common Exegol paths
             for path in [
@@ -203,7 +200,6 @@ class LinpeasEnum(ModuleBase):
             f"export TERM=xterm-256color && {remote_path} {args} 2>&1"
         )
 
-        container = self.get_option("EXEGOL_CONTAINER")
         if container:
             full_cmd = ["docker", "exec", "-e", "TERM=xterm-256color", container] + linpeas_cmd
         else:

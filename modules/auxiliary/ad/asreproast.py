@@ -37,7 +37,6 @@ class ASREPRoast(ModuleBase):
         self.register_option("OUTPUT", "Output file for hashes", default="asrep_hashes.txt")
         self.register_option("FORMAT", "Hash format: hashcat, john", default="hashcat",
                            choices=["hashcat", "john"])
-        self.register_option("EXEGOL_CONTAINER", "Exegol container name (auto-detect if empty)", default="")
 
     def run(self) -> bool:
         dc_ip = self.get_option("RHOSTS")

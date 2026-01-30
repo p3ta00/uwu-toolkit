@@ -65,8 +65,6 @@ class ADAttackEnum(ModuleBase):
         # Output
         self.register_option("OUTPUT_DIR", "Output directory for results", default="./ad_attack_enum")
 
-        # Container
-        self.register_option("EXEGOL_CONTAINER", "Exegol container (auto-detect if empty)", default="")
 
         # Store findings for attack path analysis
         self.findings = {

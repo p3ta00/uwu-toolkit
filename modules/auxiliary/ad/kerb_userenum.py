@@ -38,8 +38,6 @@ class KerberosUserEnum(ModuleBase):
         # Output
         self.register_option("OUTPUT", "Output file for valid users", default="valid_users.txt")
 
-        # Container
-        self.register_option("EXEGOL_CONTAINER", "Exegol container (auto-detect if empty)", default="")
 
     def run(self) -> bool:
         dc_ip = self.get_option("RHOSTS")

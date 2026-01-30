@@ -137,11 +137,10 @@ class CredentialManager:
         return False
 
     def list_all(self) -> List[Dict]:
-        """List all credentials"""
-        return [
-            {"key": k, **v}
-            for k, v in sorted(self.credentials.items())
-        ]
+        """List all credentials, sorted by when they were added (oldest first)"""
+        creds_with_keys = [{"key": k, **v} for k, v in self.credentials.items()]
+        # Sort by 'added' timestamp so newer creds have higher IDs
+        return sorted(creds_with_keys, key=lambda x: x.get("added", ""))
 
     def search(self, query: str) -> List[Dict]:
         """Search credentials by username, domain, or notes"""

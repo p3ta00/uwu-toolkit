@@ -36,8 +36,6 @@ class BloodySetPassword(ModuleBase):
         self.register_option("TARGET_USER", "Target user to reset password", required=True)
         self.register_option("NEW_PASS", "New password for target", required=True)
 
-        # Container
-        self.register_option("EXEGOL_CONTAINER", "Exegol container (auto-detect if empty)", default="")
 
     def run(self) -> bool:
         dc_ip = self.get_option("RHOSTS")

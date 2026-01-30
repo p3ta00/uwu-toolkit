@@ -105,18 +105,39 @@ class HashCrack(ModuleBase):
             detected_type, detected_name = self._identify_hash(first_hash)
 
             if detected_type:
-                self.print_good(f"Detected hash type: {detected_name} (mode: {detected_type})")
-                self.print_status(f"Sample hash: {first_hash[:50]}...")
-
-                # Ask for confirmation
-                confirm = input(f"\n[?] Use hash type {detected_type} ({detected_name})? [Y/n]: ").strip().lower()
-                if confirm == 'n':
-                    hashtype = input("[?] Enter hash type manually: ").strip()
-                    if not hashtype:
-                        self.print_error("No hash type provided")
-                        return False
+                # Special case: 32-char hex hash is ambiguous between MD5 and NTLM
+                if detected_type == -32:
+                    self.print_warning("32-character hex hash detected - could be MD5 or NTLM")
+                    self.print_status(f"Sample hash: {first_hash[:50]}...")
+                    print("\n[?] Select hash type:")
+                    print("    1) MD5 (mode 0) - Most common for web/CTF")
+                    print("    2) NTLM (mode 1000) - Windows password hashes")
+                    print("    3) Enter manually")
+                    choice = input("[?] Choice [1]: ").strip()
+                    if choice == '2':
+                        hashtype = "1000"
+                        self.print_good("Using NTLM (mode 1000)")
+                    elif choice == '3':
+                        hashtype = input("[?] Enter hash type manually: ").strip()
+                        if not hashtype:
+                            self.print_error("No hash type provided")
+                            return False
+                    else:
+                        hashtype = "0"
+                        self.print_good("Using MD5 (mode 0)")
                 else:
-                    hashtype = str(detected_type)
+                    self.print_good(f"Detected hash type: {detected_name} (mode: {detected_type})")
+                    self.print_status(f"Sample hash: {first_hash[:50]}...")
+
+                    # Ask for confirmation
+                    confirm = input(f"\n[?] Use hash type {detected_type} ({detected_name})? [Y/n]: ").strip().lower()
+                    if confirm == 'n':
+                        hashtype = input("[?] Enter hash type manually: ").strip()
+                        if not hashtype:
+                            self.print_error("No hash type provided")
+                            return False
+                    else:
+                        hashtype = str(detected_type)
             else:
                 self.print_error("Could not identify hash type")
                 hashtype = input("[?] Enter hash type manually: ").strip()
@@ -284,7 +305,9 @@ class HashCrack(ModuleBase):
         # By length (hex hashes)
         if re.match(r'^[a-fA-F0-9]+$', clean_hash):
             if hash_len == 32:
-                return 1000, "NTLM (or MD5 - mode 0)"
+                # MD5 and NTLM both produce 32-char hex - need to ask user
+                # Return special marker that triggers interactive selection
+                return -32, "MD5/NTLM (ambiguous)"
             elif hash_len == 40:
                 return 100, "SHA1"
             elif hash_len == 64:

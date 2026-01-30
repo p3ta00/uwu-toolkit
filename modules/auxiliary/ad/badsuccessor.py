@@ -42,8 +42,6 @@ class BadSuccessor(ModuleBase):
         # Output options
         self.register_option("OUTPUT_FILE", "Save ccache/hash output to file", default="badsuccessor_output")
 
-        # Container
-        self.register_option("EXEGOL_CONTAINER", "Exegol container (auto-detect if empty)", default="")
 
     def run(self) -> bool:
         dc_ip = self.get_option("RHOSTS")

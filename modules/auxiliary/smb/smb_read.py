@@ -45,8 +45,6 @@ class SMBRead(ModuleBase):
                            default="read", choices=["read", "list", "download"])
         self.register_option("OUTPUT", "Local output file for download", default="")
 
-        # Container
-        self.register_option("EXEGOL_CONTAINER", "Exegol container (auto-detect if empty)", default="")
 
     def run(self) -> bool:
         target = self.get_option("RHOSTS")

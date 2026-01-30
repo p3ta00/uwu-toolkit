@@ -332,7 +332,8 @@ class ModuleBase(ABC):
         # If already inside Exegol, run directly
         if self._is_inside_exegol():
             exegol_path = "/root/.local/bin:/opt/tools/bin:/opt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-            full_cmd = ["bash", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"]
+            # Use login shell (-l) to initialize pyenv
+            full_cmd = ["bash", "-l", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"]
             try:
                 result = subprocess.run(
                     full_cmd,
@@ -357,10 +358,11 @@ class ModuleBase(ABC):
 
         # Use docker exec for reliable output capture
         # Set PATH to include common tool locations in Exegol
+        # Use login shell (-l) to initialize pyenv
         exegol_path = "/root/.local/bin:/opt/tools/bin:/opt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         full_cmd = [
             "docker", "exec", container,
-            "bash", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"
+            "bash", "-l", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"
         ]
 
         try:
@@ -398,9 +400,9 @@ class ModuleBase(ABC):
         timeout = timeout or self.get_option("TIMEOUT", 120)
         exegol_path = "/root/.local/bin:/opt/tools/bin:/opt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-        # Build command
+        # Build command - use login shell (-l) for pyenv initialization
         if self._is_inside_exegol():
-            full_cmd = ["bash", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"]
+            full_cmd = ["bash", "-l", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"]
         else:
             container = container or self.get_option("EXEGOL_CONTAINER")
             if not container:
@@ -411,7 +413,7 @@ class ModuleBase(ABC):
 
             full_cmd = [
                 "docker", "exec", container,
-                "bash", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"
+                "bash", "-l", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"
             ]
 
         try:
@@ -446,6 +448,51 @@ class ModuleBase(ABC):
 
         except Exception as e:
             self.print_error(f"Error: {e}")
+            return -1
+
+    def run_in_exegol_interactive(
+        self,
+        cmd: str,
+        container: Optional[str] = None
+    ) -> int:
+        """
+        Run an interactive command inside an exegol container.
+        Used for interactive shells like psexec, evil-winrm, etc.
+
+        Args:
+            cmd: Command to execute
+            container: Container name (uses EXEGOL_CONTAINER option if not specified)
+
+        Returns: return_code
+        """
+        exegol_path = "/root/.local/bin:/opt/tools/bin:/opt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+        # Build command - use login shell (-l) for pyenv initialization
+        if self._is_inside_exegol():
+            # Already inside Exegol - run directly
+            full_cmd = ["bash", "-l", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"]
+        else:
+            container = container or self.get_option("EXEGOL_CONTAINER")
+            if not container:
+                container = self._find_exegol_container()
+                if not container:
+                    self.print_error("No Exegol container found. Set EXEGOL_CONTAINER option.")
+                    return -1
+
+            # Use -it for interactive terminal
+            full_cmd = [
+                "docker", "exec", "-it", container,
+                "bash", "-l", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"
+            ]
+
+        try:
+            # Run without capturing - direct terminal access
+            result = subprocess.run(full_cmd)
+            return result.returncode
+        except KeyboardInterrupt:
+            return 0
+        except Exception as e:
+            self.print_error(f"Interactive session error: {e}")
             return -1
 
     def _find_exegol_container(self) -> Optional[str]:

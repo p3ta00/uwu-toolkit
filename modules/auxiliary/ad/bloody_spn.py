@@ -37,8 +37,6 @@ class BloodySetSPN(ModuleBase):
         self.register_option("SPN", "SPN value to add (e.g., HTTP/fake.domain.local)", required=True)
         self.register_option("ACTION", "Action to perform", default="add", choices=["add", "remove"])
 
-        # Container
-        self.register_option("EXEGOL_CONTAINER", "Exegol container (auto-detect if empty)", default="")
 
     def run(self) -> bool:
         dc_ip = self.get_option("RHOSTS")

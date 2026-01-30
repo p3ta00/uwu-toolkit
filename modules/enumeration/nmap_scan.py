@@ -77,27 +77,31 @@ class NmapScanner(ModuleBase):
 
         profiles = {
             "quick": [
-                "nmap", "-T4", "-F",
+                "nmap", "-T4", "-F", "--open", "--min-rate", "1000",
                 "-oA", f"{base_output}_quick"
             ],
             "standard": [
-                "nmap", "-sC", "-sV", "-T4",
+                "nmap", "-sC", "-sV", "-T4", "--open", "--min-rate", "1000",
+                "--version-intensity", "2",
                 "-oA", f"{base_output}_standard"
             ],
             "full": [
-                "nmap", "-sC", "-sV", "-p-", "-T4",
+                "nmap", "-sC", "-sV", "-p-", "-T4", "--open", "--min-rate", "5000",
+                "--version-intensity", "2",
                 "-oA", f"{base_output}_full"
             ],
             "vuln": [
-                "nmap", "-sC", "-sV", "--script=vuln",
+                "nmap", "-sC", "-sV", "--script=vuln", "--open", "--min-rate", "1000",
+                "--version-intensity", "2",
                 "-oA", f"{base_output}_vuln"
             ],
             "stealth": [
-                "nmap", "-sS", "-T2", "-f",
+                "nmap", "-sS", "-T2", "-f", "--open",
                 "-oA", f"{base_output}_stealth"
             ],
             "udp": [
-                "nmap", "-sU", "-sV", "--top-ports", "100",
+                "nmap", "-sU", "-sV", "--top-ports", "50", "--open",
+                "--version-intensity", "0",
                 "-oA", f"{base_output}_udp"
             ],
         }
