@@ -1180,7 +1180,7 @@ class UwUConsole:
             for m in modules:
                 desc = m.description[:50] + "..." if len(m.description) > 50 else m.description
                 print(f"    {Style.module_path(m.path)}")
-                print(f"      {Style.dim(desc)}")
+                print(f"      {Colors.CP_FG}{desc}{Colors.RESET}")
             print()
 
     def cmd_reload(self, args: List[str]) -> None:

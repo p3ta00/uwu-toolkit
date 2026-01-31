@@ -183,7 +183,7 @@ class Style:
             parts = path.rsplit("/", 1)
             category = parts[0] + "/"
             name = parts[1]
-            return f"{Colors.GRID}{category}{Colors.RESET}{Colors.NEON_PINK}{name}{Colors.RESET}"
+            return f"{Colors.CP_FG}{category}{Colors.RESET}{Colors.NEON_PINK}{name}{Colors.RESET}"
         return cls._wrap(path, Colors.NEON_PINK)
 
     @classmethod
