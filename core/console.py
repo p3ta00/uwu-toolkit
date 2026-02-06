@@ -3431,7 +3431,37 @@ class UwUConsole:
 
         print(f"\n  {Colors.NEON_PINK}Hashcat Remote Cracking Setup{Colors.RESET}")
         print(f"  {Colors.NEON_PINK}{'='*50}{Colors.RESET}")
-        print(f"  {Colors.GRID}Configure SSH connection to a machine with hashcat/GPU{Colors.RESET}")
+        print(f"  {Colors.GRID}Configure SSH connection to a machine with hashcat/GPU{Colors.RESET}\n")
+
+        # Show/generate SSH public key for easy copy-paste
+        import os
+        ssh_dir = os.path.expanduser("~/.ssh")
+        pubkey_path = os.path.join(ssh_dir, "id_ed25519.pub")
+        privkey_path = os.path.join(ssh_dir, "id_ed25519")
+
+        # Generate key if it doesn't exist
+        if not os.path.exists(pubkey_path):
+            print(f"  {Colors.NEON_CYAN}[*] Generating SSH key...{Colors.RESET}")
+            os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
+            result = subprocess.run(
+                ["ssh-keygen", "-t", "ed25519", "-N", "", "-f", privkey_path, "-q"],
+                capture_output=True
+            )
+            if result.returncode != 0:
+                print(f"  {Colors.NEON_ORANGE}[!] Could not generate SSH key{Colors.RESET}")
+
+        # Display public key if available
+        if os.path.exists(pubkey_path):
+            with open(pubkey_path, "r") as f:
+                pubkey = f.read().strip()
+
+            print(f"  {Colors.NEON_CYAN}Your SSH Public Key:{Colors.RESET}")
+            print(f"  {Colors.NEON_PINK}{'─'*50}{Colors.RESET}")
+            print(f"  {Colors.NEON_GREEN}{pubkey}{Colors.RESET}")
+            print(f"  {Colors.NEON_PINK}{'─'*50}{Colors.RESET}")
+            print(f"\n  {Colors.NEON_ORANGE}➜ On your HOST, run:{Colors.RESET} {Colors.NEON_CYAN}hashcrack_setup --add-key{Colors.RESET}")
+            print(f"  {Colors.GRID}  Then paste the key above when prompted{Colors.RESET}\n")
+
         print(f"  {Colors.GRID}Press Enter to keep current value, or type new value{Colors.RESET}\n")
 
         # Get current values
