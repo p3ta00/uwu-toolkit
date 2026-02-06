@@ -3485,10 +3485,15 @@ class UwUConsole:
             print(f"  {Colors.NEON_CYAN}Testing SSH connection...{Colors.RESET}")
 
             ssh_target = f"{ssh_user}@{ssh_host}" if ssh_user else ssh_host
-            test_cmd = ["ssh", "-p", ssh_port, "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
-                       ssh_target, "which hashcat && hashcat --version"]
+            # Auto-accept new host keys for seamless setup
+            ssh_opts = [
+                "-o", "ConnectTimeout=10",
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "BatchMode=yes",
+            ]
+            test_cmd = ["ssh", "-p", ssh_port] + ssh_opts + [ssh_target, "which hashcat && hashcat --version"]
 
-            result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=10)
+            result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=15)
 
             if result.returncode == 0:
                 hashcat_info = result.stdout.strip().split('\n')
@@ -3498,8 +3503,8 @@ class UwUConsole:
                     print(f"  {Colors.NEON_GREEN}[+] Version: {hashcat_info[1]}{Colors.RESET}")
 
                 # Check for GPU
-                gpu_cmd = ["ssh", "-p", ssh_port, ssh_target, "hashcat -I 2>/dev/null | head -20"]
-                gpu_result = subprocess.run(gpu_cmd, capture_output=True, text=True, timeout=10, shell=False)
+                gpu_cmd = ["ssh", "-p", ssh_port] + ssh_opts + [ssh_target, "hashcat -I 2>/dev/null | head -20"]
+                gpu_result = subprocess.run(gpu_cmd, capture_output=True, text=True, timeout=15, shell=False)
                 if "Device" in gpu_result.stdout:
                     for line in gpu_result.stdout.split('\n'):
                         if 'Device' in line or 'Type' in line or 'Name' in line:
@@ -3575,10 +3580,18 @@ class UwUConsole:
 
         ssh_target = f"{ssh_user}@{ssh_host}" if ssh_user else ssh_host
 
+        # Auto-accept new host keys for seamless setup
+        ssh_opts = [
+            "-o", "ConnectTimeout=10",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "BatchMode=yes",
+        ]
+
         try:
             # Test SSH + hashcat
-            test_cmd = ["ssh", "-p", ssh_port, "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
-                       ssh_target, "which hashcat && hashcat --version && hashcat -I 2>/dev/null | head -10"]
+            test_cmd = ["ssh", "-p", ssh_port] + ssh_opts + [
+                ssh_target, "which hashcat && hashcat --version && hashcat -I 2>/dev/null | head -10"
+            ]
 
             result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=30)
 
