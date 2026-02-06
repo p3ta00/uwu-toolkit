@@ -972,9 +972,10 @@ class UwUConsole:
 
 {Colors.DIGITAL_RAIN}Setup & Config{Colors.RESET}
 {Colors.DIGITAL_RAIN}=============={Colors.RESET}
-  {Colors.NEON_CYAN}hashcrack_setup{Colors.RESET}    Configure remote hashcat cracking host
+  {Colors.NEON_CYAN}hashcrack_setup{Colors.RESET}         Configure remote hashcat cracking host
   {Colors.NEON_CYAN}hashcrack_setup --show{Colors.RESET}  Show current hashcrack config
   {Colors.NEON_CYAN}hashcrack_setup --test{Colors.RESET}  Test SSH connection to cracker
+  {Colors.NEON_CYAN}hashcrack_setup --add-key{Colors.RESET}  Add SSH key (run on HOST)
 
 {Colors.DIGITAL_RAIN}Other{Colors.RESET}
 {Colors.DIGITAL_RAIN}====={Colors.RESET}
@@ -3423,6 +3424,11 @@ class UwUConsole:
             self._hashcrack_test()
             return
 
+        # Check for --add-key flag (run from HOST to add Exegol's key)
+        if args and args[0] in ("--add-key", "-k", "add-key"):
+            self._hashcrack_add_key()
+            return
+
         print(f"\n  {Colors.NEON_PINK}Hashcat Remote Cracking Setup{Colors.RESET}")
         print(f"  {Colors.NEON_PINK}{'='*50}{Colors.RESET}")
         print(f"  {Colors.GRID}Configure SSH connection to a machine with hashcat/GPU{Colors.RESET}")
@@ -3513,8 +3519,16 @@ class UwUConsole:
             else:
                 print(f"  {Colors.NEON_ORANGE}[!] Connection failed or hashcat not found{Colors.RESET}")
                 if result.stderr:
-                    print(f"  {Colors.GRID}{result.stderr.strip()}{Colors.RESET}")
-                print(f"  {Colors.GRID}Settings will still be saved. Fix connection and run 'hashcrack_setup --test'{Colors.RESET}")
+                    stderr = result.stderr.strip()
+                    print(f"  {Colors.GRID}{stderr}{Colors.RESET}")
+                    # Detect permission denied and suggest --add-key
+                    if "Permission denied" in stderr or "publickey" in stderr:
+                        print(f"\n  {Colors.NEON_CYAN}SSH key not authorized. To fix:{Colors.RESET}")
+                        print(f"  {Colors.NEON_GREEN}1. On HOST: hashcrack_setup --add-key{Colors.RESET}")
+                        print(f"  {Colors.GRID}   (paste your Exegol public key when prompted){Colors.RESET}")
+                        print(f"  {Colors.NEON_GREEN}2. Then retry: hashcrack_setup --test{Colors.RESET}")
+                else:
+                    print(f"  {Colors.GRID}Settings will still be saved. Fix connection and run 'hashcrack_setup --test'{Colors.RESET}")
 
             # Save to globals
             print(f"\n  {Colors.NEON_CYAN}Saving to globals...{Colors.RESET}")
@@ -3611,3 +3625,66 @@ class UwUConsole:
             print(f"  {Colors.NEON_ORANGE}[!] Error: {e}{Colors.RESET}")
 
         print()
+
+    def _hashcrack_add_key(self) -> None:
+        """Add SSH public key to authorized_keys for remote cracking access"""
+        from core.colors import Colors
+        import os
+
+        print(f"\n  {Colors.NEON_PINK}Add SSH Key for Hashcat Access{Colors.RESET}")
+        print(f"  {Colors.NEON_PINK}{'='*50}{Colors.RESET}")
+        print(f"  {Colors.GRID}This adds a public key to ~/.ssh/authorized_keys{Colors.RESET}")
+        print(f"  {Colors.GRID}Run this on your HOST machine (with hashcat/GPU){Colors.RESET}\n")
+
+        print(f"  {Colors.NEON_CYAN}In your Exegol container, run:{Colors.RESET}")
+        print(f"  {Colors.NEON_GREEN}cat ~/.ssh/id_ed25519.pub{Colors.RESET}")
+        print(f"  {Colors.GRID}(or: ssh-keygen -t ed25519 && cat ~/.ssh/id_ed25519.pub){Colors.RESET}\n")
+
+        try:
+            print(f"  {Colors.NEON_CYAN}Paste your SSH public key (ssh-ed25519 or ssh-rsa):{Colors.RESET}")
+            pubkey = input("  ").strip()
+
+            if not pubkey:
+                print(f"  {Colors.NEON_ORANGE}[!] No key provided, cancelled{Colors.RESET}\n")
+                return
+
+            # Validate it looks like a public key
+            if not (pubkey.startswith("ssh-ed25519 ") or pubkey.startswith("ssh-rsa ") or
+                    pubkey.startswith("ecdsa-sha2-") or pubkey.startswith("ssh-dss ")):
+                print(f"  {Colors.NEON_ORANGE}[!] Invalid public key format{Colors.RESET}")
+                print(f"  {Colors.GRID}Key should start with: ssh-ed25519, ssh-rsa, ecdsa-sha2-, or ssh-dss{Colors.RESET}\n")
+                return
+
+            # Ensure .ssh directory exists with correct permissions
+            ssh_dir = os.path.expanduser("~/.ssh")
+            auth_keys = os.path.join(ssh_dir, "authorized_keys")
+
+            os.makedirs(ssh_dir, mode=0o700, exist_ok=True)
+
+            # Check if key already exists
+            existing_keys = ""
+            if os.path.exists(auth_keys):
+                with open(auth_keys, "r") as f:
+                    existing_keys = f.read()
+
+            if pubkey in existing_keys:
+                print(f"  {Colors.NEON_GREEN}[+] Key already in authorized_keys{Colors.RESET}\n")
+                return
+
+            # Append key
+            with open(auth_keys, "a") as f:
+                if existing_keys and not existing_keys.endswith("\n"):
+                    f.write("\n")
+                f.write(pubkey + "\n")
+
+            # Ensure correct permissions
+            os.chmod(auth_keys, 0o600)
+
+            print(f"  {Colors.NEON_GREEN}[+] Key added to {auth_keys}{Colors.RESET}")
+            print(f"\n  {Colors.NEON_CYAN}Now in Exegol, run:{Colors.RESET}")
+            print(f"  {Colors.NEON_GREEN}hashcrack_setup --test{Colors.RESET}\n")
+
+        except KeyboardInterrupt:
+            print(f"\n  {Colors.NEON_ORANGE}Cancelled{Colors.RESET}\n")
+        except Exception as e:
+            print(f"  {Colors.NEON_ORANGE}[!] Error: {e}{Colors.RESET}\n")
