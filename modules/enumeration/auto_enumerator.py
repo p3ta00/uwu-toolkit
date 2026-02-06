@@ -1,8 +1,7 @@
 """
 Auto Enumerator - Automated Target Enumeration
-Phase 1: Fast port discovery with live output
-Phase 2: Service enumeration on discovered ports
-Phase 3: Optional UDP scanning
+Phase 1: Fast port discovery with service detection (rustscan -sV)
+Phase 2: Optional UDP scanning
 
 All scanners run with real-time verbose output streaming.
 """
@@ -23,9 +22,8 @@ class AutoEnumerator(ModuleBase):
     """
     Automated target enumeration with verbose real-time output.
 
-    1. Fast scan all ports (rustscan/masscan/nmap)
-    2. Service enumeration on discovered ports (nmap -sCV)
-    3. Optional UDP scanning
+    1. Fast scan all ports with service detection (rustscan -sV / masscan / nmap)
+    2. Optional UDP scanning (top 20 ports)
     """
 
     def __init__(self):
@@ -47,8 +45,6 @@ class AutoEnumerator(ModuleBase):
         self.register_option("SCANNER", "Fast scanner to use",
                            default="auto",
                            choices=["auto", "rustscan", "masscan", "nmap"])
-        self.register_option("ENUMERATE", "Run service enumeration after discovery",
-                           default="yes", choices=["yes", "no"])
         self.register_option("UDP", "Include UDP scan (top 20 ports)",
                            default="no", choices=["yes", "no"])
         self.register_option("OUTPUT", "Output directory", default="./scan_results")
@@ -164,7 +160,6 @@ class AutoEnumerator(ModuleBase):
         scan_type = self.get_option("SCAN_TYPE")
         rate = self.get_option("RATE")
         scanner = self.get_option("SCANNER")
-        enumerate_services = self.get_option("ENUMERATE") == "yes"
         include_udp = self.get_option("UDP") == "yes"
         output_dir = self.get_option("OUTPUT")
 
@@ -203,20 +198,11 @@ class AutoEnumerator(ModuleBase):
         self.print_good(f"[+] Discovered {len(open_ports)} open TCP port(s)")
         self.print_good(f"[+] Ports: {','.join(map(str, sorted(open_ports)))}")
 
-        # Phase 2: Service enumeration
-        if enumerate_services and open_ports:
-            self.print_line()
-            self.print_good("=" * 60)
-            self.print_good("[Phase 2] Service Enumeration (nmap -sCV)")
-            self.print_good("=" * 60)
-
-            self._phase2_enumerate(target, open_ports, output_dir, timestamp)
-
         # UDP Scan
         if include_udp:
             self.print_line()
             self.print_good("=" * 60)
-            self.print_good("[Phase 3] UDP Port Scan (Top 20)")
+            self.print_good("[Phase 2] UDP Port Scan (Top 20)")
             self.print_good("=" * 60)
 
             self._udp_scan(target, output_dir, timestamp)
@@ -373,27 +359,6 @@ class AutoEnumerator(ModuleBase):
                         open_ports.add(int(port))
 
         return open_ports
-
-    def _phase2_enumerate(self, target: str, ports: Set[int], output_dir: str, timestamp: str) -> None:
-        """Phase 2: Service enumeration with live output"""
-
-        port_str = ",".join(map(str, sorted(ports)))
-        output_file = f"{output_dir}/{target.replace('/', '_')}_{timestamp}_services"
-
-        cmd = [
-            "nmap", "-sC", "-sV", "-Pn",
-            "-p", port_str,
-            "-oA", output_file,
-            "--version-intensity", "5",
-            target
-        ]
-
-        self.print_status(f"Scanning ports: {port_str}")
-
-        self._stream_process(cmd, timeout=900)
-
-        self.print_line()
-        self.print_good(f"Service scan complete: {output_file}.*")
 
     def _udp_scan(self, target: str, output_dir: str, timestamp: str) -> None:
         """UDP scan with live output"""
