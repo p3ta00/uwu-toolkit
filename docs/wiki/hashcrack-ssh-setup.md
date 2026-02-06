@@ -43,8 +43,8 @@ Continue with the prompts:
 |--------|-------------|---------|
 | SSH Host | Your host's IP (use Docker gateway from containers) | `172.17.0.1` |
 | SSH Port | SSH port | `22` |
-| SSH User | Your username on the host | `p3ta` |
-| Wordlist | Path to wordlist on the host | `/home/p3ta/wordlists/rockyou.txt` |
+| SSH User | Your username on the host | `username` |
+| Wordlist | Path to wordlist on the host | `/home/username/wordlists/rockyou.txt` |
 | Rules | Path to rules file (optional) | `/usr/share/hashcat/rules/OneRuleToRuleThemAll.rule` |
 
 ### Step 4: Verify connection
@@ -110,7 +110,7 @@ The Docker gateway IP `172.17.0.1` typically reaches your host from inside conta
 
 If mDNS/Avahi is configured, you can use `hostname.local`:
 ```
-SSH Host: mypc.local
+SSH Host: myhostname.local
 ```
 
 ## Recommended Wordlists & Rules
