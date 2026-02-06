@@ -262,17 +262,14 @@ class AutoEnumerator(ModuleBase):
     def _run_rustscan(self, target: str, port_range: str, rate: str, output_file: str) -> Set[int]:
         """Run rustscan with live output"""
 
-        cmd = ["rustscan", "-a", target, "-b", "4500", "-t", "3000", "--ulimit", rate]
+        cmd = ["rustscan", "-a", target, "--ulimit", "5000"]
 
         # Add port range if not full scan
         if port_range and port_range != "1-65535":
             cmd.extend(["-p", port_range])
 
-        # Add greppable flag for better parsing
-        cmd.extend(["-g", "--"])
-
-        # Minimal nmap options (we do detailed scan in phase 2)
-        cmd.extend(["-Pn", "-n"])
+        # Nmap options after --
+        cmd.extend(["--", "-sV", "-Pn", "-T4"])
 
         returncode, output = self._stream_process(cmd, timeout=600)
 
