@@ -241,6 +241,9 @@ class UwUConsole:
 
             # Status overview
             "status": self.cmd_status,
+
+            # Setup wizards
+            "hashcrack_setup": self.cmd_hashcrack_setup,
         }
 
         # Credential manager
@@ -966,6 +969,12 @@ class UwUConsole:
   {Colors.NEON_CYAN}creds use <user>{Colors.RESET}       Load cred into USER/PASS/DOMAIN
   {Colors.NEON_CYAN}creds show{Colors.RESET}             Show creds with secrets visible
   {Colors.NEON_CYAN}creds import <file>{Colors.RESET}    Import from secretsdump output
+
+{Colors.DIGITAL_RAIN}Setup & Config{Colors.RESET}
+{Colors.DIGITAL_RAIN}=============={Colors.RESET}
+  {Colors.NEON_CYAN}hashcrack_setup{Colors.RESET}    Configure remote hashcat cracking host
+  {Colors.NEON_CYAN}hashcrack_setup --show{Colors.RESET}  Show current hashcrack config
+  {Colors.NEON_CYAN}hashcrack_setup --test{Colors.RESET}  Test SSH connection to cracker
 
 {Colors.DIGITAL_RAIN}Other{Colors.RESET}
 {Colors.DIGITAL_RAIN}====={Colors.RESET}
@@ -3398,4 +3407,194 @@ class UwUConsole:
 
         # ---- Quick Commands ----
         print(f"\n  {Colors.GRID}Quick commands: sessions | interact <id> | listeners | start gosh{Colors.RESET}")
+        print()
+
+    def cmd_hashcrack_setup(self, args: List[str]) -> None:
+        """Configure remote hashcat cracking host"""
+        from core.colors import Colors
+
+        # Check for --show flag
+        if args and args[0] in ("--show", "-s", "show"):
+            self._hashcrack_show()
+            return
+
+        # Check for --test flag
+        if args and args[0] in ("--test", "-t", "test"):
+            self._hashcrack_test()
+            return
+
+        print(f"\n  {Colors.NEON_PINK}Hashcat Remote Cracking Setup{Colors.RESET}")
+        print(f"  {Colors.NEON_PINK}{'='*50}{Colors.RESET}")
+        print(f"  {Colors.GRID}Configure SSH connection to a machine with hashcat/GPU{Colors.RESET}")
+        print(f"  {Colors.GRID}Press Enter to keep current value, or type new value{Colors.RESET}\n")
+
+        # Get current values
+        current_host = self.config.getg("SSH_HOST") or ""
+        current_port = self.config.getg("SSH_PORT") or "22"
+        current_user = self.config.getg("SSH_USER") or ""
+        current_wordlist = self.config.getg("WORDLIST") or ""
+        current_rules = self.config.getg("RULES") or ""
+
+        try:
+            # SSH Host
+            prompt = f"  {Colors.NEON_CYAN}SSH Host{Colors.RESET}"
+            if current_host:
+                prompt += f" [{Colors.NEON_GREEN}{current_host}{Colors.RESET}]"
+            prompt += ": "
+            new_host = input(prompt).strip()
+            ssh_host = new_host if new_host else current_host
+
+            if not ssh_host:
+                print(Style.error("SSH Host is required"))
+                return
+
+            # SSH Port
+            prompt = f"  {Colors.NEON_CYAN}SSH Port{Colors.RESET} [{Colors.NEON_GREEN}{current_port}{Colors.RESET}]: "
+            new_port = input(prompt).strip()
+            ssh_port = new_port if new_port else current_port
+
+            # SSH User
+            prompt = f"  {Colors.NEON_CYAN}SSH User{Colors.RESET}"
+            if current_user:
+                prompt += f" [{Colors.NEON_GREEN}{current_user}{Colors.RESET}]"
+            else:
+                prompt += f" [{Colors.GRID}current user{Colors.RESET}]"
+            prompt += ": "
+            new_user = input(prompt).strip()
+            ssh_user = new_user if new_user else current_user
+
+            # Wordlist path
+            prompt = f"  {Colors.NEON_CYAN}Wordlist path (on remote host){Colors.RESET}"
+            if current_wordlist:
+                prompt += f"\n  [{Colors.NEON_GREEN}{current_wordlist}{Colors.RESET}]"
+            prompt += ": "
+            new_wordlist = input(prompt).strip()
+            wordlist = new_wordlist if new_wordlist else current_wordlist
+
+            # Rules file
+            prompt = f"  {Colors.NEON_CYAN}Rules file (optional, on remote host){Colors.RESET}"
+            if current_rules:
+                prompt += f"\n  [{Colors.NEON_GREEN}{current_rules}{Colors.RESET}]"
+            prompt += ": "
+            new_rules = input(prompt).strip()
+            rules = new_rules if new_rules else current_rules
+
+            print()
+
+            # Test connection
+            print(f"  {Colors.NEON_CYAN}Testing SSH connection...{Colors.RESET}")
+
+            ssh_target = f"{ssh_user}@{ssh_host}" if ssh_user else ssh_host
+            test_cmd = ["ssh", "-p", ssh_port, "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+                       ssh_target, "which hashcat && hashcat --version"]
+
+            result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=10)
+
+            if result.returncode == 0:
+                hashcat_info = result.stdout.strip().split('\n')
+                print(f"  {Colors.NEON_GREEN}[+] Connection successful!{Colors.RESET}")
+                if len(hashcat_info) >= 2:
+                    print(f"  {Colors.NEON_GREEN}[+] Hashcat: {hashcat_info[0]}{Colors.RESET}")
+                    print(f"  {Colors.NEON_GREEN}[+] Version: {hashcat_info[1]}{Colors.RESET}")
+
+                # Check for GPU
+                gpu_cmd = ["ssh", "-p", ssh_port, ssh_target, "hashcat -I 2>/dev/null | head -20"]
+                gpu_result = subprocess.run(gpu_cmd, capture_output=True, text=True, timeout=10, shell=False)
+                if "Device" in gpu_result.stdout:
+                    for line in gpu_result.stdout.split('\n'):
+                        if 'Device' in line or 'Type' in line or 'Name' in line:
+                            print(f"  {Colors.NEON_MAGENTA}    {line.strip()}{Colors.RESET}")
+
+            else:
+                print(f"  {Colors.NEON_ORANGE}[!] Connection failed or hashcat not found{Colors.RESET}")
+                if result.stderr:
+                    print(f"  {Colors.GRID}{result.stderr.strip()}{Colors.RESET}")
+                print(f"  {Colors.GRID}Settings will still be saved. Fix connection and run 'hashcrack_setup --test'{Colors.RESET}")
+
+            # Save to globals
+            print(f"\n  {Colors.NEON_CYAN}Saving to globals...{Colors.RESET}")
+            self.config.setg("SSH_HOST", ssh_host)
+            self.config.setg("SSH_PORT", ssh_port)
+            if ssh_user:
+                self.config.setg("SSH_USER", ssh_user)
+            if wordlist:
+                self.config.setg("WORDLIST", wordlist)
+            if rules:
+                self.config.setg("RULES", rules)
+
+            print(f"  {Colors.NEON_GREEN}[+] Configuration saved!{Colors.RESET}")
+            print(f"\n  {Colors.GRID}Run 'hashcrack_setup --show' to view current config{Colors.RESET}")
+            print(f"  {Colors.GRID}Run 'hashcrack_setup --test' to test connection{Colors.RESET}")
+            print()
+
+        except KeyboardInterrupt:
+            print(f"\n  {Colors.NEON_ORANGE}Setup cancelled{Colors.RESET}\n")
+        except subprocess.TimeoutExpired:
+            print(f"  {Colors.NEON_ORANGE}[!] SSH connection timed out{Colors.RESET}")
+            print(f"  {Colors.GRID}Check host and try again{Colors.RESET}\n")
+        except Exception as e:
+            print(f"  {Colors.NEON_ORANGE}[!] Error: {e}{Colors.RESET}\n")
+
+    def _hashcrack_show(self) -> None:
+        """Show current hashcrack configuration"""
+        from core.colors import Colors
+
+        print(f"\n  {Colors.NEON_PINK}Hashcat Remote Cracking Config{Colors.RESET}")
+        print(f"  {Colors.NEON_PINK}{'='*50}{Colors.RESET}\n")
+
+        settings = [
+            ("SSH_HOST", self.config.getg("SSH_HOST")),
+            ("SSH_PORT", self.config.getg("SSH_PORT") or "22"),
+            ("SSH_USER", self.config.getg("SSH_USER") or "(current user)"),
+            ("WORDLIST", self.config.getg("WORDLIST")),
+            ("RULES", self.config.getg("RULES")),
+        ]
+
+        for name, value in settings:
+            if value:
+                print(f"  {Colors.NEON_CYAN}{name:<12}{Colors.RESET} {Colors.NEON_GREEN}{value}{Colors.RESET}")
+            else:
+                print(f"  {Colors.NEON_CYAN}{name:<12}{Colors.RESET} {Colors.GRID}(not set){Colors.RESET}")
+
+        print(f"\n  {Colors.GRID}Run 'hashcrack_setup' to configure{Colors.RESET}")
+        print(f"  {Colors.GRID}Run 'hashcrack_setup --test' to test connection{Colors.RESET}\n")
+
+    def _hashcrack_test(self) -> None:
+        """Test hashcrack SSH connection"""
+        from core.colors import Colors
+
+        ssh_host = self.config.getg("SSH_HOST")
+        ssh_port = self.config.getg("SSH_PORT") or "22"
+        ssh_user = self.config.getg("SSH_USER")
+
+        if not ssh_host:
+            print(Style.error("SSH_HOST not configured. Run 'hashcrack_setup' first."))
+            return
+
+        print(f"\n  {Colors.NEON_CYAN}Testing SSH connection to {ssh_host}...{Colors.RESET}")
+
+        ssh_target = f"{ssh_user}@{ssh_host}" if ssh_user else ssh_host
+
+        try:
+            # Test SSH + hashcat
+            test_cmd = ["ssh", "-p", ssh_port, "-o", "ConnectTimeout=10", "-o", "BatchMode=yes",
+                       ssh_target, "which hashcat && hashcat --version && hashcat -I 2>/dev/null | head -10"]
+
+            result = subprocess.run(test_cmd, capture_output=True, text=True, timeout=30)
+
+            if result.returncode == 0:
+                print(f"  {Colors.NEON_GREEN}[+] Connection successful!{Colors.RESET}")
+                for line in result.stdout.strip().split('\n'):
+                    if line.strip():
+                        print(f"      {line}")
+            else:
+                print(f"  {Colors.NEON_ORANGE}[!] Connection failed{Colors.RESET}")
+                if result.stderr:
+                    print(f"  {Colors.GRID}{result.stderr.strip()}{Colors.RESET}")
+
+        except subprocess.TimeoutExpired:
+            print(f"  {Colors.NEON_ORANGE}[!] Connection timed out{Colors.RESET}")
+        except Exception as e:
+            print(f"  {Colors.NEON_ORANGE}[!] Error: {e}{Colors.RESET}")
+
         print()
