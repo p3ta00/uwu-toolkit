@@ -3450,17 +3450,15 @@ class UwUConsole:
             if result.returncode != 0:
                 print(f"  {Colors.NEON_ORANGE}[!] Could not generate SSH key{Colors.RESET}")
 
-        # Display public key if available
+        # Display public key with copy-paste one-liner for host
         if os.path.exists(pubkey_path):
             with open(pubkey_path, "r") as f:
                 pubkey = f.read().strip()
 
-            print(f"  {Colors.NEON_CYAN}Your SSH Public Key:{Colors.RESET}")
-            print(f"  {Colors.NEON_PINK}{'─'*50}{Colors.RESET}")
-            print(f"  {Colors.NEON_GREEN}{pubkey}{Colors.RESET}")
-            print(f"  {Colors.NEON_PINK}{'─'*50}{Colors.RESET}")
-            print(f"\n  {Colors.NEON_ORANGE}➜ On your HOST, run:{Colors.RESET} {Colors.NEON_CYAN}hashcrack_setup --add-key{Colors.RESET}")
-            print(f"  {Colors.GRID}  Then paste the key above when prompted{Colors.RESET}\n")
+            print(f"  {Colors.NEON_ORANGE}➜ Run this on your HOST to authorize this key:{Colors.RESET}")
+            print(f"  {Colors.NEON_PINK}{'─'*60}{Colors.RESET}")
+            print(f"  {Colors.NEON_GREEN}echo '{pubkey}' >> ~/.ssh/authorized_keys{Colors.RESET}")
+            print(f"  {Colors.NEON_PINK}{'─'*60}{Colors.RESET}\n")
 
         print(f"  {Colors.GRID}Press Enter to keep current value, or type new value{Colors.RESET}\n")
 
