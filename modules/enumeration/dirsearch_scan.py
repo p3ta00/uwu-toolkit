@@ -27,7 +27,7 @@ class DirSearchScanner(ModuleBase):
         # Register options
         self.register_option("TARGET_URL", "Target URL (e.g., http://example.com)", required=True)
         self.register_option("WORDLIST", "Path to wordlist",
-                           default="/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt")
+                           default="/usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt")
         self.register_option("TOOL", "Tool to use: gobuster, feroxbuster, ffuf, dirsearch",
                            default="auto", choices=["auto", "gobuster", "feroxbuster", "ffuf", "dirsearch"])
         self.register_option("EXTENSIONS", "File extensions to search (e.g., php,html,txt)", default="")
