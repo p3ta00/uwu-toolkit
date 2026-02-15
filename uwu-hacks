@@ -1,0 +1,539 @@
+#!/usr/bin/env python3
+"""
+uwu-hacks - Modular CTF credential management toolkit
+Combines all uwu-* tools into a single unified interface
+"""
+
+import sqlite3
+import sys
+import argparse
+import subprocess
+import os
+from pathlib import Path
+from datetime import datetime
+
+# Dracula Theme Colors
+class Colors:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    CYAN = '\033[38;2;139;233;253m'
+    GREEN = '\033[38;2;80;250;123m'
+    ORANGE = '\033[38;2;255;184;108m'
+    PINK = '\033[38;2;255;121;198m'
+    PURPLE = '\033[38;2;189;147;249m'
+    RED = '\033[38;2;255;85;85m'
+    YELLOW = '\033[38;2;241;250;140m'
+    COMMENT = '\033[38;2;98;114;164m'
+
+class CTFCredsDB:
+    """Shared database management class"""
+    def __init__(self):
+        self.db_dir = Path(os.getcwd()) / '.ctf'
+        self.db_path = self.db_dir / 'credentials.db'
+        self.init_db()
+
+    def init_db(self):
+        """Initialize the database and create table if it doesn't exist"""
+        self.db_dir.mkdir(exist_ok=True)
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                machine TEXT NOT NULL,
+                username TEXT NOT NULL,
+                domain TEXT,
+                password TEXT,
+                hash TEXT,
+                hash_type TEXT,
+                notes TEXT,
+                status TEXT DEFAULT 'none',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(machine, username, domain)
+            )
+        ''')
+        conn.commit()
+        conn.close()
+
+    def add_credential(self, machine, username, password=None, hash_val=None, hash_type=None, domain=None, notes=None):
+        """Add or update a credential entry"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO credentials (machine, username, domain, password, hash, hash_type, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(machine, username, domain) DO UPDATE SET
+                    password = COALESCE(excluded.password, password),
+                    hash = COALESCE(excluded.hash, hash),
+                    hash_type = COALESCE(excluded.hash_type, hash_type),
+                    notes = COALESCE(excluded.notes, notes),
+                    updated_at = CURRENT_TIMESTAMP
+            ''', (machine, username, domain, password, hash_val, hash_type, notes))
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"{Colors.RED}Database error: {e}{Colors.RESET}")
+            return False
+        finally:
+            conn.close()
+
+    def get_all_credentials(self):
+        """Retrieve all credentials"""
+        if not self.db_path.exists():
+            return []
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, machine, username, domain, password, hash, hash_type, notes, status, created_at, updated_at
+            FROM credentials
+            ORDER BY machine, username
+        ''')
+        results = cursor.fetchall()
+        conn.close()
+        return results
+
+    def get_by_machine(self, machine):
+        """Get credentials for a specific machine"""
+        if not self.db_path.exists():
+            return []
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, machine, username, domain, password, hash, hash_type, notes, status, created_at, updated_at
+            FROM credentials
+            WHERE machine LIKE ?
+            ORDER BY username
+        ''', (f'%{machine}%',))
+        results = cursor.fetchall()
+        conn.close()
+        return results
+
+    def get_pwned(self):
+        """Get the credential marked as pwned"""
+        if not self.db_path.exists():
+            return None
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, machine, username, domain, password, hash, hash_type, notes, status, created_at, updated_at
+            FROM credentials
+            WHERE status = 'pwned'
+            LIMIT 1
+        ''')
+        result = cursor.fetchone()
+        conn.close()
+        return result
+
+    def get_target(self):
+        """Get the credential marked as target"""
+        if not self.db_path.exists():
+            return None
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            SELECT id, machine, username, domain, password, hash, hash_type, notes, status, created_at, updated_at
+            FROM credentials
+            WHERE status = 'target'
+            LIMIT 1
+        ''')
+        result = cursor.fetchone()
+        conn.close()
+        return result
+
+    def mark_pwned(self, cred_id):
+        """Mark a credential as pwned"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        try:
+            # Clear any existing pwned status
+            cursor.execute("UPDATE credentials SET status = 'none' WHERE status = 'pwned'")
+            # Set new pwned status
+            cursor.execute("UPDATE credentials SET status = 'pwned' WHERE id = ?", (cred_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def mark_target(self, cred_id):
+        """Mark a credential as target"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        try:
+            # Clear any existing target status
+            cursor.execute("UPDATE credentials SET status = 'none' WHERE status = 'target'")
+            # Set new target status
+            cursor.execute("UPDATE credentials SET status = 'target' WHERE id = ?", (cred_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def clear_status(self, cred_id):
+        """Clear the status of a credential"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        try:
+            cursor.execute("UPDATE credentials SET status = 'none' WHERE id = ?", (cred_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def delete_credential(self, cred_id):
+        """Delete a credential"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        try:
+            cursor.execute("DELETE FROM credentials WHERE id = ?", (cred_id,))
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+# ============================================================================
+# SUBCOMMAND: loot (Add credentials)
+# ============================================================================
+def cmd_loot(args):
+    """Add credentials to the database"""
+    db = CTFCredsDB()
+    if db.add_credential(
+        args.machine,
+        args.username,
+        args.password,
+        args.hash,
+        args.hash_type,
+        args.domain,
+        args.notes
+    ):
+        print(f"\n{Colors.GREEN}✓ Credential added/updated successfully!{Colors.RESET}")
+        print(f"{Colors.CYAN}Machine:{Colors.RESET} {args.machine}")
+        if args.domain:
+            print(f"{Colors.CYAN}Domain:{Colors.RESET} {args.domain}")
+        print(f"{Colors.CYAN}Username:{Colors.RESET} {args.username}")
+        if args.password:
+            print(f"{Colors.CYAN}Password:{Colors.RESET} {args.password}")
+        if args.hash:
+            print(f"{Colors.CYAN}Hash:{Colors.RESET} {args.hash[:30]}...")
+        print()
+
+# ============================================================================
+# SUBCOMMAND: list (List credentials)
+# ============================================================================
+def cmd_list(args):
+    """List credentials from the database"""
+    db = CTFCredsDB()
+
+    # Print banner
+    print(f"""
+{Colors.PURPLE}╔═══════════════════════════════════════════════════════════╗
+║                                                           ║
+║          {Colors.PINK}📋 uwu-hacks list - View Credentials 📋{Colors.PURPLE}          ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝{Colors.RESET}
+""")
+
+    if args.selected:
+        # Show only pwned and target
+        pwned = db.get_pwned()
+        target = db.get_target()
+
+        if pwned:
+            print(f"\n{Colors.GREEN}PWNED:{Colors.RESET}")
+            print_credential_row(pwned)
+
+        if target:
+            print(f"\n{Colors.RED}TARGET:{Colors.RESET}")
+            print_credential_row(target)
+
+        if not pwned and not target:
+            print(f"{Colors.YELLOW}No credentials marked as pwned or target{Colors.RESET}")
+    else:
+        # Get credentials
+        if args.machine:
+            creds = db.get_by_machine(args.machine)
+            title = f"Credentials for: {args.machine}"
+        else:
+            creds = db.get_all_credentials()
+            title = "All Credentials"
+
+        if not creds:
+            print(f"{Colors.YELLOW}No credentials found{Colors.RESET}\n")
+            return
+
+        # Print header
+        print(f"\n{Colors.PINK}{title}{Colors.RESET}")
+        print(f"{Colors.PURPLE}{'═' * 180}{Colors.RESET}")
+        print(f"{Colors.PINK}{Colors.BOLD}{'ID':<6}{'Machine':<26}{'Domain':<16}{'Username':<21}{'Password':<21}{'Hash':<31}{'Type':<11}{'Status':<10}{Colors.RESET}")
+        print(f"{Colors.PURPLE}{'═' * 180}{Colors.RESET}")
+
+        # Print credentials
+        for cred in creds:
+            print_credential_row(cred)
+
+        print(f"{Colors.PURPLE}{'═' * 180}{Colors.RESET}")
+        print(f"\n{Colors.GREEN}Total: {len(creds)} credential(s){Colors.RESET}\n")
+
+def print_credential_row(cred):
+    """Helper to print a single credential row"""
+    cred_id, machine, username, domain, password, hash_val, hash_type, notes, status, created_at, updated_at = cred
+
+    # Truncate long values
+    display_hash = (hash_val[:28] + '...') if hash_val and len(hash_val) > 28 else (hash_val or '-')
+    display_password = (password[:18] + '...') if password and len(password) > 18 else (password or '-')
+
+    # Color status
+    if status == 'pwned':
+        status_colored = f"{Colors.GREEN}{status:<10}{Colors.RESET}"
+    elif status == 'target':
+        status_colored = f"{Colors.RED}{status:<10}{Colors.RESET}"
+    else:
+        status_colored = f"{Colors.COMMENT}{'-':<10}{Colors.RESET}"
+
+    print(f"{Colors.CYAN}{cred_id:<5}{Colors.RESET} "
+          f"{Colors.GREEN}{machine:<25}{Colors.RESET} "
+          f"{Colors.PURPLE}{(domain or '-'):<15}{Colors.RESET} "
+          f"{Colors.ORANGE}{username:<20}{Colors.RESET} "
+          f"{Colors.YELLOW}{display_password:<20}{Colors.RESET} "
+          f"{Colors.PURPLE}{display_hash:<30}{Colors.RESET} "
+          f"{Colors.COMMENT}{(hash_type or '-'):<10}{Colors.RESET} "
+          f"{status_colored} ")
+
+# ============================================================================
+# SUBCOMMAND: pwned (Mark as pwned)
+# ============================================================================
+def cmd_pwned(args):
+    """Mark a credential as pwned"""
+    db = CTFCredsDB()
+    if args.clear:
+        # Clear pwned status
+        creds = db.get_all_credentials()
+        for cred in creds:
+            if cred[8] == 'pwned':  # status field
+                db.clear_status(cred[0])
+        print(f"{Colors.GREEN}✓ Pwned status cleared{Colors.RESET}")
+    else:
+        if db.mark_pwned(args.id):
+            print(f"{Colors.GREEN}✓ Credential {args.id} marked as PWNED!{Colors.RESET}")
+        else:
+            print(f"{Colors.RED}Error: Credential ID {args.id} not found{Colors.RESET}")
+
+# ============================================================================
+# SUBCOMMAND: target (Mark as target)
+# ============================================================================
+def cmd_target(args):
+    """Mark a credential as target"""
+    db = CTFCredsDB()
+    if args.clear:
+        # Clear target status
+        creds = db.get_all_credentials()
+        for cred in creds:
+            if cred[8] == 'target':  # status field
+                db.clear_status(cred[0])
+        print(f"{Colors.RED}✓ Target status cleared{Colors.RESET}")
+    else:
+        if db.mark_target(args.id):
+            print(f"{Colors.RED}✓ Credential {args.id} marked as TARGET!{Colors.RESET}")
+        else:
+            print(f"{Colors.RED}Error: Credential ID {args.id} not found{Colors.RESET}")
+
+# ============================================================================
+# SUBCOMMAND: export (Export environment variables)
+# ============================================================================
+def cmd_export(args):
+    """Export credentials as environment variables"""
+    db = CTFCredsDB()
+    pwned = db.get_pwned()
+    target = db.get_target()
+
+    if args.show:
+        # Display what would be exported
+        print(f"{Colors.GREEN}Exported Variables:{Colors.RESET}\n")
+        if pwned:
+            cred_id, machine, username, domain, password, hash_val, hash_type, notes, status, created_at, updated_at = pwned
+            print(f"  {Colors.YELLOW}PWNED_USER{Colors.RESET} = {Colors.CYAN}{username}{Colors.RESET}")
+            if domain:
+                print(f"  {Colors.YELLOW}PWNED_DOMAIN{Colors.RESET} = {Colors.CYAN}{domain}{Colors.RESET}")
+            if password:
+                print(f"  {Colors.YELLOW}PWNED_PASS{Colors.RESET} = {Colors.CYAN}{password}{Colors.RESET}")
+            if hash_val:
+                print(f"  {Colors.YELLOW}PWNED_HASH{Colors.RESET} = {Colors.CYAN}{hash_val}{Colors.RESET}")
+            print(f"  {Colors.YELLOW}PWNED_MACHINE{Colors.RESET} = {Colors.CYAN}{machine}{Colors.RESET}")
+
+        if target:
+            cred_id, machine, username, domain, password, hash_val, hash_type, notes, status, created_at, updated_at = target
+            print(f"  {Colors.YELLOW}TARGET_USER{Colors.RESET} = {Colors.CYAN}{username}{Colors.RESET}")
+            if domain:
+                print(f"  {Colors.YELLOW}TARGET_DOMAIN{Colors.RESET} = {Colors.CYAN}{domain}{Colors.RESET}")
+            if password:
+                print(f"  {Colors.YELLOW}TARGET_PASS{Colors.RESET} = {Colors.CYAN}{password}{Colors.RESET}")
+            if hash_val:
+                print(f"  {Colors.YELLOW}TARGET_HASH{Colors.RESET} = {Colors.CYAN}{hash_val}{Colors.RESET}")
+            print(f"  {Colors.YELLOW}TARGET_MACHINE{Colors.RESET} = {Colors.CYAN}{machine}{Colors.RESET}")
+    else:
+        # Output export commands for eval
+        if pwned:
+            cred_id, machine, username, domain, password, hash_val, hash_type, notes, status, created_at, updated_at = pwned
+            print(f"export PWNED_USER='{username}'")
+            if domain:
+                print(f"export PWNED_DOMAIN='{domain}'")
+            if password:
+                print(f"export PWNED_PASS='{password}'")
+            if hash_val:
+                print(f"export PWNED_HASH='{hash_val}'")
+            print(f"export PWNED_MACHINE='{machine}'")
+
+        if target:
+            cred_id, machine, username, domain, password, hash_val, hash_type, notes, status, created_at, updated_at = target
+            print(f"export TARGET_USER='{username}'")
+            if domain:
+                print(f"export TARGET_DOMAIN='{domain}'")
+            if password:
+                print(f"export TARGET_PASS='{password}'")
+            if hash_val:
+                print(f"export TARGET_HASH='{hash_val}'")
+            print(f"export TARGET_MACHINE='{machine}'")
+
+# ============================================================================
+# SUBCOMMAND: navi (Launch navi with credentials)
+# ============================================================================
+def cmd_navi(args):
+    """Launch navi with loaded credentials"""
+    db = CTFCredsDB()
+    pwned = db.get_pwned()
+    target = db.get_target()
+
+    # Set environment variables
+    env = os.environ.copy()
+    if pwned:
+        cred_id, machine, username, domain, password, hash_val, hash_type, notes, status, created_at, updated_at = pwned
+        env['PWNED_USER'] = username
+        env['PWNED_MACHINE'] = machine
+        if domain:
+            env['PWNED_DOMAIN'] = domain
+        if password:
+            env['PWNED_PASS'] = password
+        if hash_val:
+            env['PWNED_HASH'] = hash_val
+
+    if target:
+        cred_id, machine, username, domain, password, hash_val, hash_type, notes, status, created_at, updated_at = target
+        env['TARGET_USER'] = username
+        env['TARGET_MACHINE'] = machine
+        if domain:
+            env['TARGET_DOMAIN'] = domain
+        if password:
+            env['TARGET_PASS'] = password
+        if hash_val:
+            env['TARGET_HASH'] = hash_val
+
+    # Launch navi
+    try:
+        result = subprocess.run(['navi', '--print'], env=env, capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            cmd = result.stdout.strip()
+            print(f"{Colors.CYAN}Executing:{Colors.RESET} {Colors.YELLOW}{cmd}{Colors.RESET}")
+            # Execute the command
+            os.system(cmd)
+    except FileNotFoundError:
+        print(f"{Colors.RED}Error: navi is not installed{Colors.RESET}")
+        print(f"{Colors.YELLOW}Install with: cargo install navi{Colors.RESET}")
+
+# ============================================================================
+# SUBCOMMAND: delete (Delete credential)
+# ============================================================================
+def cmd_delete(args):
+    """Delete a credential from the database"""
+    db = CTFCredsDB()
+    if db.delete_credential(args.id):
+        print(f"{Colors.GREEN}✓ Credential {args.id} deleted{Colors.RESET}")
+    else:
+        print(f"{Colors.RED}Error: Credential ID {args.id} not found{Colors.RESET}")
+
+# ============================================================================
+# MAIN ENTRY POINT
+# ============================================================================
+def main():
+    """Main entry point with argument parsing"""
+    parser = argparse.ArgumentParser(
+        description='uwu-hacks - Modular CTF credential management toolkit',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=f"""
+{Colors.GREEN}Examples:{Colors.RESET}
+  {Colors.CYAN}uwu-hacks loot{Colors.RESET} 10.10.11.123 admin -p Password123
+  {Colors.CYAN}uwu-hacks list{Colors.RESET}
+  {Colors.CYAN}uwu-hacks pwned{Colors.RESET} 1
+  {Colors.CYAN}uwu-hacks target{Colors.RESET} 2
+  {Colors.CYAN}uwu-hacks export{Colors.RESET} --show
+  {Colors.CYAN}eval $(uwu-hacks export){Colors.RESET}
+  {Colors.CYAN}uwu-hacks navi{Colors.RESET}
+
+{Colors.GREEN}Subcommands:{Colors.RESET}
+  loot      Add credentials to database
+  list      List credentials
+  pwned     Mark credential as pwned
+  target    Mark credential as target
+  export    Export credentials to environment
+  navi      Launch navi with credentials
+  delete    Delete a credential
+        """
+    )
+
+    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+
+    # Subcommand: loot
+    parser_loot = subparsers.add_parser('loot', help='Add credentials to database')
+    parser_loot.add_argument('machine', help='Machine/host')
+    parser_loot.add_argument('username', help='Username')
+    parser_loot.add_argument('-d', '--domain', help='Domain name')
+    parser_loot.add_argument('-p', '--password', help='Password')
+    parser_loot.add_argument('-H', '--hash', help='Hash value')
+    parser_loot.add_argument('-t', '--hash-type', help='Hash type (NTLM, MD5, etc.)')
+    parser_loot.add_argument('-n', '--notes', help='Additional notes')
+    parser_loot.set_defaults(func=cmd_loot)
+
+    # Subcommand: list
+    parser_list = subparsers.add_parser('list', help='List credentials')
+    parser_list.add_argument('machine', nargs='?', help='Filter by machine')
+    parser_list.add_argument('-s', '--selected', action='store_true', help='Show only pwned/target')
+    parser_list.set_defaults(func=cmd_list)
+
+    # Subcommand: pwned
+    parser_pwned = subparsers.add_parser('pwned', help='Mark credential as pwned')
+    parser_pwned.add_argument('id', type=int, nargs='?', help='Credential ID')
+    parser_pwned.add_argument('-c', '--clear', action='store_true', help='Clear pwned status')
+    parser_pwned.set_defaults(func=cmd_pwned)
+
+    # Subcommand: target
+    parser_target = subparsers.add_parser('target', help='Mark credential as target')
+    parser_target.add_argument('id', type=int, nargs='?', help='Credential ID')
+    parser_target.add_argument('-c', '--clear', action='store_true', help='Clear target status')
+    parser_target.set_defaults(func=cmd_target)
+
+    # Subcommand: export
+    parser_export = subparsers.add_parser('export', help='Export credentials to environment')
+    parser_export.add_argument('--show', action='store_true', help='Display instead of outputting export commands')
+    parser_export.set_defaults(func=cmd_export)
+
+    # Subcommand: navi
+    parser_navi = subparsers.add_parser('navi', help='Launch navi with credentials')
+    parser_navi.set_defaults(func=cmd_navi)
+
+    # Subcommand: delete
+    parser_delete = subparsers.add_parser('delete', help='Delete a credential')
+    parser_delete.add_argument('id', type=int, help='Credential ID to delete')
+    parser_delete.set_defaults(func=cmd_delete)
+
+    # Parse arguments
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
+
+    # Execute subcommand
+    args.func(args)
+
+if __name__ == '__main__':
+    main()

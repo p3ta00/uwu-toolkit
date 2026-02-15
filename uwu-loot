@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""
+uwu-loot - Add credentials and findings to CTF database
+Part of the uwu-* CTF toolkit
+"""
+
+import sqlite3
+import sys
+import os
+from pathlib import Path
+from datetime import datetime
+
+# Dracula Theme Colors
+class Colors:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    CYAN = '\033[38;2;139;233;253m'
+    GREEN = '\033[38;2;80;250;123m'
+    ORANGE = '\033[38;2;255;184;108m'
+    PINK = '\033[38;2;255;121;198m'
+    PURPLE = '\033[38;2;189;147;249m'
+    RED = '\033[38;2;255;85;85m'
+    YELLOW = '\033[38;2;241;250;140m'
+    COMMENT = '\033[38;2;98;114;164m'
+
+class CTFCredsDB:
+    def __init__(self):
+        self.db_dir = Path(os.getcwd()) / '.ctf'
+        self.db_path = self.db_dir / 'credentials.db'
+        self.init_db()
+
+    def init_db(self):
+        """Initialize the database and create table if it doesn't exist"""
+        self.db_dir.mkdir(exist_ok=True)
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Check if table exists and needs migration
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='credentials'")
+        table_exists = cursor.fetchone()
+
+        if table_exists:
+            # Check if machine column is NOT NULL (old schema)
+            cursor.execute("PRAGMA table_info(credentials)")
+            columns = cursor.fetchall()
+            machine_col = [col for col in columns if col[1] == 'machine']
+
+            if machine_col and machine_col[0][3] == 1:  # NOT NULL constraint exists
+                # Migrate to new schema
+                cursor.execute('''
+                    CREATE TABLE credentials_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        machine TEXT,
+                        username TEXT,
+                        domain TEXT,
+                        password TEXT,
+                        hash TEXT,
+                        hash_type TEXT,
+                        notes TEXT,
+                        status TEXT DEFAULT 'none',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+
+                # Copy data
+                cursor.execute('''
+                    INSERT INTO credentials_new
+                    SELECT * FROM credentials
+                ''')
+
+                # Drop old table and rename new one
+                cursor.execute('DROP TABLE credentials')
+                cursor.execute('ALTER TABLE credentials_new RENAME TO credentials')
+        else:
+            # Create new table
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS credentials (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    machine TEXT,
+                    username TEXT,
+                    domain TEXT,
+                    password TEXT,
+                    hash TEXT,
+                    hash_type TEXT,
+                    notes TEXT,
+                    status TEXT DEFAULT 'none',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+        conn.commit()
+        conn.close()
+
+    def add_credential(self, machine=None, username=None, password=None, hash_val=None, hash_type=None, domain=None, notes=None):
+        """Add a credential entry"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute('''
+                INSERT INTO credentials (machine, username, domain, password, hash, hash_type, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (machine, username, domain, password, hash_val, hash_type, notes))
+
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"{Colors.RED}Database error: {e}{Colors.RESET}")
+            return False
+        finally:
+            conn.close()
+
+    def delete_credential(self, cred_id):
+        """Delete a credential by ID"""
+        if not self.db_path.exists():
+            return False
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('DELETE FROM credentials WHERE id = ?', (cred_id,))
+        deleted = cursor.rowcount
+
+        conn.commit()
+        conn.close()
+        return deleted > 0
+
+def print_help():
+    """Print usage help"""
+    help_text = f"""
+{Colors.PURPLE}╔═══════════════════════════════════════════════════════════╗
+║                                                           ║
+║          {Colors.PINK}🎯 uwu-loot - Add CTF Findings 🎯{Colors.PURPLE}                ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝{Colors.RESET}
+
+{Colors.GREEN}USAGE:{Colors.RESET}
+    {Colors.CYAN}uwu-loot{Colors.RESET} [{Colors.ORANGE}<machine>{Colors.RESET}] [{Colors.ORANGE}<username>{Colors.RESET}] [{Colors.COMMENT}options{Colors.RESET}]
+    {Colors.CYAN}uwu-loot{Colors.RESET} {Colors.YELLOW}delete{Colors.RESET} {Colors.ORANGE}<id>{Colors.RESET}
+
+{Colors.GREEN}OPTIONAL POSITIONAL:{Colors.RESET}
+    {Colors.ORANGE}<machine>{Colors.RESET}       Machine/host/IP address (optional)
+    {Colors.ORANGE}<username>{Colors.RESET}      Username of the account (optional)
+
+{Colors.GREEN}OPTIONS:{Colors.RESET}
+    {Colors.YELLOW}-u, --username{Colors.RESET} {Colors.ORANGE}<user>{Colors.RESET}      Username
+    {Colors.YELLOW}-d, --domain{Colors.RESET} {Colors.ORANGE}<domain>{Colors.RESET}      Domain name (for domain users)
+    {Colors.YELLOW}-p, --password{Colors.RESET} {Colors.ORANGE}<pass>{Colors.RESET}      Password
+    {Colors.YELLOW}-H, --hash{Colors.RESET} {Colors.ORANGE}<hash>{Colors.RESET}          Hash value (NTLM, etc.)
+    {Colors.YELLOW}-t, --hash-type{Colors.RESET} {Colors.ORANGE}<type>{Colors.RESET}    Hash type (NTLM, MD5, SHA256, etc.)
+    {Colors.YELLOW}-n, --notes{Colors.RESET} {Colors.ORANGE}<notes>{Colors.RESET}       Additional notes
+    {Colors.YELLOW}-h, --help{Colors.RESET}                Show this help message
+
+{Colors.GREEN}EXAMPLES:{Colors.RESET}
+    {Colors.COMMENT}# Add just a password (no machine or user){Colors.RESET}
+    {Colors.CYAN}uwu-loot{Colors.RESET} {Colors.YELLOW}-p{Colors.RESET} {Colors.ORANGE}Password123{Colors.RESET} {Colors.YELLOW}-n{Colors.RESET} {Colors.ORANGE}"Found default password"{Colors.RESET}
+
+    {Colors.COMMENT}# Add just a username{Colors.RESET}
+    {Colors.CYAN}uwu-loot{Colors.RESET} {Colors.YELLOW}-u{Colors.RESET} {Colors.ORANGE}administrator{Colors.RESET} {Colors.YELLOW}-n{Colors.RESET} {Colors.ORANGE}"Valid username found"{Colors.RESET}
+
+    {Colors.COMMENT}# Add just an IP for tracking{Colors.RESET}
+    {Colors.CYAN}uwu-loot{Colors.RESET} {Colors.ORANGE}10.10.11.123{Colors.RESET} {Colors.YELLOW}-n{Colors.RESET} {Colors.ORANGE}"Initial target"{Colors.RESET}
+
+    {Colors.COMMENT}# Add credentials with password{Colors.RESET}
+    {Colors.CYAN}uwu-loot{Colors.RESET} {Colors.ORANGE}10.10.11.123 administrator{Colors.RESET} {Colors.YELLOW}-p{Colors.RESET} {Colors.ORANGE}P@ssw0rd123{Colors.RESET}
+
+    {Colors.COMMENT}# Add domain credentials{Colors.RESET}
+    {Colors.CYAN}uwu-loot{Colors.RESET} {Colors.ORANGE}dc01.corp.local Administrator{Colors.RESET} {Colors.YELLOW}-d{Colors.RESET} {Colors.ORANGE}CORP{Colors.RESET} {Colors.YELLOW}-p{Colors.RESET} {Colors.ORANGE}Welcome1{Colors.RESET}
+
+    {Colors.COMMENT}# Add credentials with NTLM hash{Colors.RESET}
+    {Colors.CYAN}uwu-loot{Colors.RESET} {Colors.ORANGE}target.htb john{Colors.RESET} {Colors.YELLOW}-H{Colors.RESET} {Colors.ORANGE}aad3b435b51404ee...{Colors.RESET} {Colors.YELLOW}-t{Colors.RESET} {Colors.ORANGE}NTLM{Colors.RESET}
+
+    {Colors.COMMENT}# Delete an entry by ID{Colors.RESET}
+    {Colors.CYAN}uwu-loot{Colors.RESET} {Colors.YELLOW}delete{Colors.RESET} {Colors.ORANGE}1{Colors.RESET}
+
+{Colors.GREEN}RELATED TOOLS:{Colors.RESET}
+    {Colors.CYAN}uwu-list{Colors.RESET}      List all stored credentials
+    {Colors.CYAN}uwu-pwned{Colors.RESET}     Mark credentials as pwned
+    {Colors.CYAN}uwu-target{Colors.RESET}    Mark credentials as target
+    {Colors.CYAN}uwu-export{Colors.RESET}    Export credentials to environment
+    {Colors.CYAN}uwu-navi{Colors.RESET}      Launch navi with loaded credentials
+"""
+    print(help_text)
+
+def parse_args(args):
+    """Parse command line arguments"""
+    data = {
+        'machine': None,
+        'username': None,
+        'domain': None,
+        'password': None,
+        'hash': None,
+        'hash_type': None,
+        'notes': None
+    }
+
+    if len(args) < 1:
+        return data
+
+    # Check if first argument is a positional (machine) or a flag
+    i = 0
+    if i < len(args) and not args[i].startswith('-'):
+        data['machine'] = args[i]
+        i = 1
+
+    # Check if second argument is a positional (username) or a flag
+    if i < len(args) and not args[i].startswith('-'):
+        data['username'] = args[i]
+        i += 1
+
+    # Parse remaining flags
+    while i < len(args):
+        if args[i] in ['-u', '--username'] and i + 1 < len(args):
+            data['username'] = args[i + 1]
+            i += 2
+        elif args[i] in ['-d', '--domain'] and i + 1 < len(args):
+            data['domain'] = args[i + 1]
+            i += 2
+        elif args[i] in ['-p', '--password'] and i + 1 < len(args):
+            data['password'] = args[i + 1]
+            i += 2
+        elif args[i] in ['-H', '--hash'] and i + 1 < len(args):
+            data['hash'] = args[i + 1]
+            i += 2
+        elif args[i] in ['-t', '--hash-type'] and i + 1 < len(args):
+            data['hash_type'] = args[i + 1]
+            i += 2
+        elif args[i] in ['-n', '--notes'] and i + 1 < len(args):
+            data['notes'] = args[i + 1]
+            i += 2
+        else:
+            print(f"{Colors.YELLOW}Warning: Unknown argument '{args[i]}'{Colors.RESET}")
+            i += 1
+
+    return data
+
+def main():
+    # Check for help flag
+    if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help', 'help']:
+        print_help()
+        sys.exit(0)
+
+    if len(sys.argv) < 2:
+        print(f"{Colors.RED}Error: At least one argument is required{Colors.RESET}")
+        print(f"Run {Colors.CYAN}uwu-loot -h{Colors.RESET} for help\n")
+        sys.exit(1)
+
+    db = CTFCredsDB()
+
+    # Handle delete command
+    if sys.argv[1] == 'delete':
+        if len(sys.argv) < 3:
+            print(f"{Colors.RED}Error: Credential ID required{Colors.RESET}")
+            print(f"Usage: {Colors.CYAN}uwu-loot delete <id>{Colors.RESET}\n")
+            sys.exit(1)
+
+        try:
+            cred_id = int(sys.argv[2])
+            if db.delete_credential(cred_id):
+                print(f"\n{Colors.GREEN}✓ Entry {cred_id} deleted successfully!{Colors.RESET}\n")
+            else:
+                print(f"\n{Colors.RED}✗ Entry not found{Colors.RESET}\n")
+        except ValueError:
+            print(f"{Colors.RED}Error: Invalid ID. Must be a number.{Colors.RESET}\n")
+        sys.exit(0)
+
+    data = parse_args(sys.argv[1:])
+
+    # Check that at least one piece of data is provided
+    if not any([data['machine'], data['username'], data['password'], data['hash'], data['notes']]):
+        print(f"{Colors.RED}Error: At least one of machine, username, password, hash, or notes must be provided{Colors.RESET}")
+        print(f"Run {Colors.CYAN}uwu-loot -h{Colors.RESET} for help\n")
+        sys.exit(1)
+
+    if db.add_credential(
+        data['machine'],
+        data['username'],
+        data['password'],
+        data['hash'],
+        data['hash_type'],
+        data['domain'],
+        data['notes']
+    ):
+        print(f"\n{Colors.GREEN}✓ Entry added successfully!{Colors.RESET}")
+        if data['machine']:
+            print(f"{Colors.CYAN}Machine:{Colors.RESET} {data['machine']}")
+        if data['domain']:
+            print(f"{Colors.CYAN}Domain:{Colors.RESET} {data['domain']}")
+        if data['username']:
+            print(f"{Colors.CYAN}Username:{Colors.RESET} {data['username']}")
+        if data['password']:
+            print(f"{Colors.CYAN}Password:{Colors.RESET} {data['password']}")
+        if data['hash']:
+            print(f"{Colors.CYAN}Hash:{Colors.RESET} {data['hash'][:30]}...")
+        if data['notes']:
+            print(f"{Colors.CYAN}Notes:{Colors.RESET} {data['notes']}")
+        print()
+
+if __name__ == '__main__':
+    main()

@@ -1,140 +1,88 @@
 # UwU Toolkit
 
-A modular penetration testing framework designed for Active Directory and network assessments. Built for use with Exegol, Kali, and similar security-focused environments.
+A modular penetration testing framework inspired by Metasploit, designed for modern offensive security workflows. Built to run seamlessly inside Exegol containers with a cyberpunk neon aesthetic.
 
-## Features
+**[Full Documentation & Wiki](https://p3ta00.github.io/uwu-toolkit/)**
 
-- **Modular Architecture**: Easily extensible module system for enumeration, exploitation, and post-exploitation
-- **Session Management**: Background shells via tmux with interactive reattachment
-- **Global Variables**: Persistent target configuration across modules
-- **Integrated Pivoting**: Built-in Ligolo-ng integration for network pivoting
-- **Payload Generation**: Sliver C2 integration and custom payload builders
-- **Real-time Dashboard**: HTTP request monitoring and loot organization
-
-## Installation
-
-```bash
-git clone https://github.com/p3ta00/uwu-toolkit.git
-cd uwu-toolkit
-./setup.sh
-```
-
-The setup script will:
-- Check and install required dependencies
-- Install Python packages (prompt_toolkit, rich, requests, pyyaml, donut-shellcode)
-- Create symlinks for `uwu` and `uwu-dashboard` commands
-- Set up shell integration
+---
 
 ## Quick Start
 
 ```bash
-# Start the toolkit
+# Interactive mode
 uwu
 
-# Set global target
-setg RHOSTS 10.10.10.10
-setg DOMAIN corp.local
+# Set target and creds once, use everywhere
+uwu > setg RHOSTS 10.10.10.100
+uwu > setg DOMAIN corp.local
+uwu > setg USER admin
+uwu > setg PASS Password123
 
-# Search for modules
-search smb
-search ad
-
-# Use a module
-use enumeration/smb_enum
-run
-
-# Start a listener
-start nc 4444
-
-# Manage sessions
-sessions
-interact <session-name>
+# Find and run modules
+uwu > search kerberos
+uwu > use ad/kerberoast
+uwu > run
 ```
+
+---
+
+## Installation
+
+### Exegol (Recommended)
+
+```bash
+git clone https://github.com/p3ta00/uwu-toolkit.git /opt/my-resources/tools/uwu-toolkit
+cd /opt/my-resources/tools/uwu-toolkit
+./install-exegol.sh
+```
+
+### Kali / Debian
+
+```bash
+git clone https://github.com/p3ta00/uwu-toolkit.git ~/uwu-toolkit
+cd ~/uwu-toolkit
+./install-kali.sh
+```
+
+---
 
 ## Module Categories
 
-| Category | Description |
-|----------|-------------|
-| `enumeration/` | Network and service enumeration (SMB, DNS, FTP, NFS, web fuzzing) |
-| `auxiliary/` | AD attacks (Evil-WinRM, BloodHound, Kerberoasting, DCSync) |
-| `exploits/` | Exploitation modules |
-| `payloads/` | Payload generation (Sliver, shellcode, PowerShell) |
-| `post/` | Post-exploitation (privilege escalation, credential harvesting) |
+| Type | Path Prefix | Count | Description |
+|------|-------------|-------|-------------|
+| **Impacket** | `impacket/` | 40+ | Every Impacket tool auto-wrapped as a module |
+| **BloodyAD** | `bloodyad/` | 25+ | Every BloodyAD operation auto-wrapped |
+| **AD** | `ad/` | 30+ | Custom AD attack & enumeration modules |
+| **Auxiliary** | `auxiliary/` | 15+ | SMB, SSH, web, cracking, git, AWS |
+| **Enumeration** | `enumeration/` | 10+ | Host and service discovery |
+| **Post** | `post/` | 15+ | Post-exploitation (Linux & Windows) |
+| **Payloads** | `payloads/` | 4 | Reverse shells, ASPX, Donut |
+| **Exploits** | `exploits/` | 3+ | Exploitation modules |
 
-## Key Commands
+## Integrations
 
-| Command | Description |
-|---------|-------------|
-| `setg <VAR> <value>` | Set global variable |
-| `sessions` | List active tmux sessions |
-| `interact <name>` | Attach to a backgrounded session |
-| `ligolo` | Enter Ligolo pivoting mode |
-| `potatoes download` | Download privilege escalation tools |
-| `sliver` | Enter Sliver C2 integration mode |
-| `start nc <port>` | Quick netcat listener |
-| `start http <port>` | Quick HTTP server |
+- **Exegol** - Auto-detects container, finds tools automatically
+- **Claude AI** - Interactive security assistant (`claude ask "..."`)
+- **Sliver C2** - Server/client management from within UwU
+- **Penelope** - Shell handler with auto-upgrade
+- **Ligolo-ng** - Network tunneling with route management
+- **MCP Server** - Model Context Protocol server for AI agent integration
 
-## Session Management
+---
 
-Sessions run in tmux and can be backgrounded:
-- `Ctrl+b d` or `Ctrl+b x`: Detach (background) the session
-- `sessions`: List all active sessions
-- `interact <name>`: Reattach to a session
-- `kill <name>`: Terminate a session
+## Documentation
 
-## Dashboard
+| Page | Link |
+|------|------|
+| **Wiki Home** | [p3ta00.github.io/uwu-toolkit](https://p3ta00.github.io/uwu-toolkit/) |
+| **Installation** | [Installation Guide](https://p3ta00.github.io/uwu-toolkit/installation/) |
+| **Commands** | [Commands Reference](https://p3ta00.github.io/uwu-toolkit/commands/) |
+| **Custom Tooling** | [Custom Modules](https://p3ta00.github.io/uwu-toolkit/custom-tooling/) |
+| **Integrations** | [Impacket, BloodyAD, Claude, Sliver, Penelope, Ligolo](https://p3ta00.github.io/uwu-toolkit/integrations/) |
+| **Modules Guide** | [Using & Creating Modules](https://p3ta00.github.io/uwu-toolkit/modules/) |
+| **Quick Reference** | [Cheat Sheet](https://p3ta00.github.io/uwu-toolkit/quick-reference/) |
 
-The `uwu-dashboard` provides real-time monitoring:
-- HTTP request logging from file servers
-- Loot organization by target
-- Session status overview
-
-```bash
-uwu-dashboard
-```
-
-## Dependencies
-
-### Required
-- Python 3.8+
-- tmux
-- nmap
-- netcat/socat
-
-### Recommended Tools
-- NetExec / CrackMapExec
-- Evil-WinRM
-- Impacket suite
-- BloodHound.py
-- Ligolo-ng
-- Sliver C2
-- Donut (shellcode generator)
-
-## Directory Structure
-
-```
-uwu-toolkit/
-├── core/           # Framework core (console, module base, utilities)
-├── modules/        # Enumeration, exploitation, and post-ex modules
-├── scripts/        # Helper scripts
-├── data/           # Static data files
-├── loot/           # Engagement loot (gitignored)
-├── logs/           # Session logs (gitignored)
-└── reports/        # Generated reports (gitignored)
-```
-
-## Configuration
-
-Global variables are stored in `~/.uwu-toolkit/globals.json` and persist across sessions.
-
-Common variables:
-- `RHOSTS`: Target IP/hostname
-- `DOMAIN`: Active Directory domain
-- `USER`: Username for authentication
-- `PASS`: Password
-- `HASH`: NTLM hash for pass-the-hash
-- `LHOST`: Local IP for reverse connections
-- `LPORT`: Local port for listeners
+---
 
 ## License
 

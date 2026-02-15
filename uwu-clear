@@ -1,0 +1,21 @@
+#!/bin/bash
+#
+# uwu-clear - Clear UwU Toolkit data stores
+# Part of the uwu-* standalone tools
+#
+# Usage:
+#   uwu-clear all          Clear everything
+#   uwu-clear db           Clear all DB tables
+#   uwu-clear creds        Clear credentials table
+#   uwu-clear targets      Clear targets table
+#   uwu-clear globals      Clear global variables
+#   uwu-clear permanent    Clear permanent variables
+#   uwu-clear history      Clear variable + command history
+#   uwu-clear events       Clear dashboard events
+#
+
+# Find the toolkit directory (same dir as this script)
+TOOLKIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Delegate to the UwU console command
+exec python3 "${TOOLKIT_DIR}/uwu" -x "uwu-clear $*"

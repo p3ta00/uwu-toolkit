@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""
+uwu-export - Export credentials to environment variables
+Part of the uwu-* CTF toolkit
+"""
+
+import sqlite3
+import sys
+import os
+from pathlib import Path
+
+# Dracula Theme Colors
+class Colors:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    CYAN = '\033[38;2;139;233;253m'
+    GREEN = '\033[38;2;80;250;123m'
+    ORANGE = '\033[38;2;255;184;108m'
+    PINK = '\033[38;2;255;121;198m'
+    PURPLE = '\033[38;2;189;147;249m'
+    RED = '\033[38;2;255;85;85m'
+    YELLOW = '\033[38;2;241;250;140m'
+    COMMENT = '\033[38;2;98;114;164m'
+
+class CTFCredsDB:
+    def __init__(self):
+        self.db_dir = Path(os.getcwd()) / '.ctf'
+        self.db_path = self.db_dir / 'credentials.db'
+
+    def get_pwned(self):
+        """Get the credential marked as pwned"""
+        if not self.db_path.exists():
+            return None
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT id, machine, username, domain, password, hash, hash_type, notes, status, created_at, updated_at
+            FROM credentials
+            WHERE status = 'pwned'
+            LIMIT 1
+        ''')
+
+        result = cursor.fetchone()
+        conn.close()
+        return result
+
+    def get_target(self):
+        """Get the credential marked as target"""
+        if not self.db_path.exists():
+            return None
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT id, machine, username, domain, password, hash, hash_type, notes, status, created_at, updated_at
+            FROM credentials
+            WHERE status = 'target'
+            LIMIT 1
+        ''')
+
+        result = cursor.fetchone()
+        conn.close()
+        return result
+
+    def export_env(self):
+        """Export pwned and target credentials as environment variables"""
+        pwned = self.get_pwned()
+        target = self.get_target()
+
+        env_vars = []
+
+        if pwned:
+            _, machine, username, domain, password, hash_val, hash_type, notes, status, _, _ = pwned
+            env_vars.append(f'export PWNED_USER="{username}"')
+            env_vars.append(f'export PWNED_DOMAIN="{domain or ""}"')
+            env_vars.append(f'export PWNED_PASS="{password or ""}"')
+            env_vars.append(f'export PWNED_HASH="{hash_val or ""}"')
+            env_vars.append(f'export PWNED_MACHINE="{machine}"')
+
+        if target:
+            _, machine, username, domain, password, hash_val, hash_type, notes, status, _, _ = target
+            env_vars.append(f'export TARGET_USER="{username}"')
+            env_vars.append(f'export TARGET_DOMAIN="{domain or ""}"')
+            env_vars.append(f'export TARGET_PASS="{password or ""}"')
+            env_vars.append(f'export TARGET_HASH="{hash_val or ""}"')
+            env_vars.append(f'export TARGET_MACHINE="{machine}"')
+
+        return env_vars
+
+def print_help():
+    """Print usage help"""
+    help_text = f"""
+{Colors.PURPLE}╔═══════════════════════════════════════════════════════════╗
+║                                                           ║
+║      {Colors.CYAN}📤 uwu-export - Export to Environment 📤{Colors.PURPLE}         ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝{Colors.RESET}
+
+{Colors.GREEN}USAGE:{Colors.RESET}
+    {Colors.CYAN}uwu-export{Colors.RESET}              Export credentials to shell
+    {Colors.CYAN}uwu-export{Colors.RESET} {Colors.YELLOW}--show{Colors.RESET}       Show what would be exported
+    {Colors.CYAN}uwu-export{Colors.RESET} {Colors.YELLOW}-h{Colors.RESET}           Show this help
+
+{Colors.GREEN}DESCRIPTION:{Colors.RESET}
+    Export pwned and target credentials as environment variables.
+    Use with 'eval' to load them into your current shell session.
+
+{Colors.GREEN}OPTIONS:{Colors.RESET}
+    {Colors.YELLOW}--show{Colors.RESET}            Show variables without exporting
+    {Colors.YELLOW}-h, --help{Colors.RESET}        Show this help message
+
+{Colors.GREEN}EXPORTED VARIABLES:{Colors.RESET}
+    {Colors.COMMENT}# Pwned (compromised) credentials{Colors.RESET}
+    {Colors.YELLOW}PWNED_USER{Colors.RESET}        Username
+    {Colors.YELLOW}PWNED_DOMAIN{Colors.RESET}      Domain name
+    {Colors.YELLOW}PWNED_PASS{Colors.RESET}        Password
+    {Colors.YELLOW}PWNED_HASH{Colors.RESET}        NTLM/hash value
+    {Colors.YELLOW}PWNED_MACHINE{Colors.RESET}     Source machine
+
+    {Colors.COMMENT}# Target credentials{Colors.RESET}
+    {Colors.YELLOW}TARGET_USER{Colors.RESET}       Username
+    {Colors.YELLOW}TARGET_DOMAIN{Colors.RESET}     Domain name
+    {Colors.YELLOW}TARGET_PASS{Colors.RESET}       Password
+    {Colors.YELLOW}TARGET_HASH{Colors.RESET}       NTLM/hash value
+    {Colors.YELLOW}TARGET_MACHINE{Colors.RESET}    Target machine
+
+{Colors.GREEN}EXAMPLES:{Colors.RESET}
+    {Colors.COMMENT}# Load credentials into current shell{Colors.RESET}
+    {Colors.CYAN}eval $(uwu-export){Colors.RESET}
+
+    {Colors.COMMENT}# Show what will be exported{Colors.RESET}
+    {Colors.CYAN}uwu-export --show{Colors.RESET}
+
+    {Colors.COMMENT}# Use in navi cheatsheets{Colors.RESET}
+    {Colors.CYAN}eval $(uwu-export){Colors.RESET}
+    {Colors.CYAN}navi{Colors.RESET}
+
+    {Colors.COMMENT}# Use with impacket tools{Colors.RESET}
+    {Colors.CYAN}eval $(uwu-export){Colors.RESET}
+    {Colors.CYAN}impacket-secretsdump "$PWNED_DOMAIN/$PWNED_USER:$PWNED_PASS@$TARGET_MACHINE"{Colors.RESET}
+
+{Colors.GREEN}WORKFLOW:{Colors.RESET}
+    {Colors.CYAN}1.{Colors.RESET} Add credentials:      {Colors.CYAN}uwu-loot <machine> <user> -p <pass>{Colors.RESET}
+    {Colors.CYAN}2.{Colors.RESET} Mark as pwned:        {Colors.CYAN}uwu-pwned <id>{Colors.RESET}
+    {Colors.CYAN}3.{Colors.RESET} Mark target:          {Colors.CYAN}uwu-target <id>{Colors.RESET}
+    {Colors.CYAN}4.{Colors.RESET} Export to shell:      {Colors.CYAN}eval $(uwu-export){Colors.RESET}
+    {Colors.CYAN}5.{Colors.RESET} Use in commands:      {Colors.CYAN}echo $PWNED_USER{Colors.RESET}
+
+{Colors.GREEN}RELATED TOOLS:{Colors.RESET}
+    {Colors.CYAN}uwu-loot{Colors.RESET}      Add credentials to database
+    {Colors.CYAN}uwu-list{Colors.RESET}      List all credentials
+    {Colors.CYAN}uwu-pwned{Colors.RESET}     Mark compromised credentials
+    {Colors.CYAN}uwu-target{Colors.RESET}    Mark target credentials
+    {Colors.CYAN}uwu-navi{Colors.RESET}      Launch navi with credentials loaded
+"""
+    print(help_text)
+
+def main():
+    # Check for help flag
+    if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help', 'help']:
+        print_help()
+        sys.exit(0)
+
+    db = CTFCredsDB()
+    env_vars = db.export_env()
+
+    # Show mode
+    if len(sys.argv) > 1 and sys.argv[1] == '--show':
+        if env_vars:
+            print(f"\n{Colors.GREEN}Exported Variables:{Colors.RESET}\n")
+            for var in env_vars:
+                # Pretty print without 'export'
+                var_clean = var.replace('export ', '')
+                var_name = var_clean.split('=')[0]
+                var_value = var_clean.split('=')[1].strip('"')
+                if var_value:
+                    print(f"  {Colors.YELLOW}{var_name}{Colors.RESET} = {Colors.CYAN}{var_value}{Colors.RESET}")
+            print()
+        else:
+            print(f"\n{Colors.YELLOW}No credentials selected.{Colors.RESET}")
+            print(f"Use {Colors.CYAN}uwu-pwned{Colors.RESET} and {Colors.CYAN}uwu-target{Colors.RESET} to mark credentials.\n")
+    else:
+        # Export mode (default)
+        for var in env_vars:
+            print(var)
+
+if __name__ == '__main__':
+    main()

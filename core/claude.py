@@ -29,6 +29,8 @@ class ClaudeSession:
         self.messages: List[Dict[str, str]] = []
         self.system_prompt = system_prompt or self._default_system_prompt()
         self.context_files: List[str] = []  # Files loaded into context
+        self.total_input_tokens: int = 0
+        self.total_output_tokens: int = 0
 
     def _default_system_prompt(self) -> str:
         return """You are Claude, an AI assistant integrated into UwU Toolkit - a penetration testing framework.
@@ -56,6 +58,16 @@ Format code blocks with appropriate language tags."""
         self.messages = []
         self.context_files = []
 
+    def add_token_usage(self, input_tokens: int, output_tokens: int) -> None:
+        """Track token usage for this session"""
+        self.total_input_tokens += input_tokens
+        self.total_output_tokens += output_tokens
+
+    def get_token_summary(self) -> str:
+        """Get token usage summary"""
+        total = self.total_input_tokens + self.total_output_tokens
+        return f"Session tokens: {total:,} total ({self.total_input_tokens:,} in / {self.total_output_tokens:,} out)"
+
     def get_summary(self) -> str:
         """Get a brief summary of this session"""
         msg_count = len(self.messages)
@@ -66,15 +78,75 @@ Format code blocks with appropriate language tags."""
 class ClaudeSessionManager:
     """Manages multiple Claude sessions"""
 
+    SESSIONS_DIR = Path.home() / ".uwu-toolkit" / "claude_sessions"
+
     def __init__(self):
         self.sessions: Dict[str, ClaudeSession] = {}
         self.active_session_id: Optional[str] = None
+        self._load_sessions()
+
+    def _load_sessions(self) -> None:
+        """Load persisted sessions from disk on startup"""
+        if not self.SESSIONS_DIR.exists():
+            return
+        for session_file in self.SESSIONS_DIR.glob("*.json"):
+            try:
+                data = json.loads(session_file.read_text())
+                session = ClaudeSession(
+                    session_id=data.get("id"),
+                    name=data.get("name"),
+                    system_prompt=data.get("system_prompt"),
+                )
+                session.messages = data.get("messages", [])
+                session.context_files = data.get("context_files", [])
+                session.total_input_tokens = data.get("total_input_tokens", 0)
+                session.total_output_tokens = data.get("total_output_tokens", 0)
+                created = data.get("created_at")
+                if created:
+                    session.created_at = datetime.fromisoformat(created)
+                self.sessions[session.id] = session
+            except Exception:
+                # Skip corrupt session files silently
+                pass
+        # Restore active session from marker file
+        active_file = self.SESSIONS_DIR / ".active"
+        if active_file.exists():
+            active_id = active_file.read_text().strip()
+            if active_id in self.sessions:
+                self.active_session_id = active_id
+
+    def _save_session(self, session: ClaudeSession) -> None:
+        """Persist a single session to disk"""
+        self.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        data = {
+            "id": session.id,
+            "name": session.name,
+            "created_at": session.created_at.isoformat(),
+            "system_prompt": session.system_prompt,
+            "messages": session.messages,
+            "context_files": session.context_files,
+            "total_input_tokens": session.total_input_tokens,
+            "total_output_tokens": session.total_output_tokens,
+        }
+        session_file = self.SESSIONS_DIR / f"{session.id}.json"
+        session_file.write_text(json.dumps(data, indent=2))
+        # Save active session marker
+        if self.active_session_id:
+            active_file = self.SESSIONS_DIR / ".active"
+            active_file.write_text(self.active_session_id)
+
+    def _delete_session_file(self, session_id: str) -> None:
+        """Remove a session file from disk"""
+        session_file = self.SESSIONS_DIR / f"{session_id}.json"
+        if session_file.exists():
+            session_file.unlink()
 
     def create_session(self, name: str = None, system_prompt: str = None) -> ClaudeSession:
         """Create a new session"""
         session = ClaudeSession(name=name, system_prompt=system_prompt)
         self.sessions[session.id] = session
         self.active_session_id = session.id
+        self._save_session(session)
         return session
 
     def get_active_session(self) -> Optional[ClaudeSession]:
@@ -99,6 +171,7 @@ class ClaudeSessionManager:
         """Delete a session"""
         for sid in list(self.sessions.keys()):
             if sid == session_id or self.sessions[sid].name == session_id or sid.startswith(session_id):
+                self._delete_session_file(sid)
                 del self.sessions[sid]
                 if self.active_session_id == sid:
                     self.active_session_id = next(iter(self.sessions.keys()), None)
@@ -222,6 +295,7 @@ class ClaudeMode:
             session = self.session_manager.get_active_session()
             if session:
                 session.clear()
+                self.session_manager._save_session(session)
                 print(Style.success("Conversation cleared"))
 
         elif command == "new":
@@ -259,6 +333,7 @@ class ClaudeMode:
             if session:
                 old_name = session.name
                 session.name = args
+                self.session_manager._save_session(session)
                 print(Style.success(f"Renamed '{old_name}' to '{args}'"))
 
         elif command == "context":
@@ -289,6 +364,17 @@ class ClaudeMode:
                     print(f"{Colors.GRID}{'-'*50}{Colors.RESET}")
                     print(session.system_prompt)
                     print()
+
+        elif command == "tokens":
+            session = self.session_manager.get_active_session()
+            if session:
+                print(f"\n  {Style.highlight('Token Usage')}")
+                print(f"  {Colors.NEON_PINK}{'='*50}{Colors.RESET}")
+                print(f"  Input tokens:  {session.total_input_tokens:,}")
+                print(f"  Output tokens: {session.total_output_tokens:,}")
+                total = session.total_input_tokens + session.total_output_tokens
+                print(f"  Total:         {total:,}")
+                print()
 
         elif command == "history":
             self._show_history()
@@ -367,6 +453,7 @@ class ClaudeMode:
 {Colors.NEON_CYAN}Settings{Colors.RESET}
   {Colors.NEON_GREEN}/model [name]{Colors.RESET}       View/set Claude model
   {Colors.NEON_GREEN}/history{Colors.RESET}            Show conversation history
+  {Colors.NEON_GREEN}/tokens{Colors.RESET}             Show token usage for session
   {Colors.NEON_GREEN}/help{Colors.RESET}               Show this help
 """)
 
@@ -420,6 +507,7 @@ class ClaudeMode:
             session.add_message("user", context_msg)
             session.add_message("assistant", "I've received the code context. I'll reference it in our conversation. What would you like to know about it?")
             session.context_files.append(path)
+            self.session_manager._save_session(session)
             print(Style.success(f"Loaded context from: {path}"))
             print(Style.dim(f"  {len(content):,} characters added to context"))
         else:
@@ -449,7 +537,7 @@ class ClaudeMode:
             print()
 
     def _send_message(self, message: str) -> None:
-        """Send a message to Claude"""
+        """Send a message to Claude with streaming output and token tracking"""
         session = self.session_manager.get_active_session()
         if not session:
             print(Style.error("No active session"))
@@ -459,35 +547,56 @@ class ClaudeMode:
         session.add_message("user", message)
 
         print()
-        print(Style.dim("Thinking..."))
+        print(f"  {Colors.NEON_PURPLE}Claude:{Colors.RESET}")
+        print(f"  {Colors.NEON_PINK}{'─'*60}{Colors.RESET}")
 
         try:
             client = self.assistant._get_client()
-            response = client.messages.create(
+            collected_text = ""
+            input_tokens = 0
+            output_tokens = 0
+
+            import sys
+            with client.messages.stream(
                 model=self.assistant.model,
                 max_tokens=4096,
                 system=session.system_prompt,
                 messages=session.get_messages()
-            )
+            ) as stream:
+                for text in stream.text_stream:
+                    collected_text += text
+                    # Print each character/chunk inline, handling newlines for indentation
+                    for char in text:
+                        if char == '\n':
+                            sys.stdout.write('\n  ')
+                        else:
+                            sys.stdout.write(char)
+                    sys.stdout.flush()
 
-            assistant_message = response.content[0].text
-            session.add_message("assistant", assistant_message)
+                # Get final message for token usage
+                final_message = stream.get_final_message()
+                if final_message.usage:
+                    input_tokens = final_message.usage.input_tokens
+                    output_tokens = final_message.usage.output_tokens
 
-            # Clear "Thinking..." and print response
-            print(f"\033[A\033[K", end="")  # Move up and clear line
-            print(f"\n  {Colors.NEON_PURPLE}Claude:{Colors.RESET}")
-            print(f"  {Colors.NEON_PINK}{'─'*60}{Colors.RESET}")
-
-            for line in assistant_message.split('\n'):
-                print(f"  {line}")
-
-            print(f"  {Colors.NEON_PINK}{'─'*60}{Colors.RESET}")
+            # Ensure we end on a newline
             print()
+            print(f"  {Colors.NEON_PINK}{'─'*60}{Colors.RESET}")
+
+            # Track tokens
+            session.add_token_usage(input_tokens, output_tokens)
+            total = input_tokens + output_tokens
+            print(f"  {Colors.GRID}Tokens: {input_tokens:,} in / {output_tokens:,} out ({total:,} total) | {session.get_token_summary()}{Colors.RESET}")
+            print()
+
+            # Save message and persist session
+            session.add_message("assistant", collected_text)
+            self.session_manager._save_session(session)
 
         except Exception as e:
             # Remove the user message since we failed
             session.messages.pop()
-            print(f"\033[A\033[K", end="")
+            print()
             print(Style.error(f"API error: {e}"))
             print()
 
@@ -619,7 +728,7 @@ Be direct and technical. Focus on practical, actionable information."""
         return "\n".join(content_parts), errors
 
     def analyze_vulnerabilities(self, paths: List[str], focus: Optional[str] = None) -> str:
-        """Analyze code for security vulnerabilities"""
+        """Analyze code for security vulnerabilities with streaming output"""
         available, msg = self.is_available()
         if not available:
             return Style.error(msg)
@@ -644,21 +753,44 @@ Be direct and technical. Focus on practical, actionable information."""
         print()
 
         try:
+            import sys
             client = self._get_client()
-            response = client.messages.create(
+            collected_text = ""
+
+            print(f"  {Style.highlight('Vulnerability Analysis')}")
+            print(f"  {Colors.NEON_PINK}{'='*60}{Colors.RESET}")
+            print()
+
+            with client.messages.stream(
                 model=self.model,
                 max_tokens=4096,
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}]
-            )
+            ) as stream:
+                for text in stream.text_stream:
+                    collected_text += text
+                    for char in text:
+                        if char == '\n':
+                            sys.stdout.write('\n  ')
+                        else:
+                            sys.stdout.write(char)
+                    sys.stdout.flush()
 
-            return self._format_response(response.content[0].text, "Vulnerability Analysis")
+                final_message = stream.get_final_message()
+                input_tokens = final_message.usage.input_tokens if final_message.usage else 0
+                output_tokens = final_message.usage.output_tokens if final_message.usage else 0
+
+            print()
+            print()
+            total = input_tokens + output_tokens
+            print(f"  {Colors.GRID}Tokens: {input_tokens:,} in / {output_tokens:,} out ({total:,} total){Colors.RESET}")
+            return ""
 
         except Exception as e:
             return Style.error(f"API error: {e}")
 
     def debug_code(self, paths: List[str], error_msg: Optional[str] = None) -> str:
-        """Debug code for syntax errors and issues"""
+        """Debug code for syntax errors and issues with streaming output"""
         available, msg = self.is_available()
         if not available:
             return Style.error(msg)
@@ -681,21 +813,44 @@ Be direct and technical. Focus on practical, actionable information."""
         print()
 
         try:
+            import sys
             client = self._get_client()
-            response = client.messages.create(
+            collected_text = ""
+
+            print(f"  {Style.highlight('Debug Analysis')}")
+            print(f"  {Colors.NEON_PINK}{'='*60}{Colors.RESET}")
+            print()
+
+            with client.messages.stream(
                 model=self.model,
                 max_tokens=4096,
                 system=self.DEBUG_PROMPT,
                 messages=[{"role": "user", "content": user_prompt}]
-            )
+            ) as stream:
+                for text in stream.text_stream:
+                    collected_text += text
+                    for char in text:
+                        if char == '\n':
+                            sys.stdout.write('\n  ')
+                        else:
+                            sys.stdout.write(char)
+                    sys.stdout.flush()
 
-            return self._format_response(response.content[0].text, "Debug Analysis")
+                final_message = stream.get_final_message()
+                input_tokens = final_message.usage.input_tokens if final_message.usage else 0
+                output_tokens = final_message.usage.output_tokens if final_message.usage else 0
+
+            print()
+            print()
+            total = input_tokens + output_tokens
+            print(f"  {Colors.GRID}Tokens: {input_tokens:,} in / {output_tokens:,} out ({total:,} total){Colors.RESET}")
+            return ""
 
         except Exception as e:
             return Style.error(f"API error: {e}")
 
     def ask(self, question: str, context_paths: Optional[List[str]] = None) -> str:
-        """Ask Claude a general question, optionally with code context"""
+        """Ask Claude a general question with streaming output"""
         available, msg = self.is_available()
         if not available:
             return Style.error(msg)
@@ -712,15 +867,38 @@ Be direct and technical. Focus on practical, actionable information."""
         print()
 
         try:
+            import sys
             client = self._get_client()
-            response = client.messages.create(
+            collected_text = ""
+
+            print(f"  {Style.highlight('Response')}")
+            print(f"  {Colors.NEON_PINK}{'='*60}{Colors.RESET}")
+            print()
+
+            with client.messages.stream(
                 model=self.model,
                 max_tokens=4096,
                 system=self.GENERAL_PROMPT,
                 messages=[{"role": "user", "content": user_prompt}]
-            )
+            ) as stream:
+                for text in stream.text_stream:
+                    collected_text += text
+                    for char in text:
+                        if char == '\n':
+                            sys.stdout.write('\n  ')
+                        else:
+                            sys.stdout.write(char)
+                    sys.stdout.flush()
 
-            return self._format_response(response.content[0].text, "Response")
+                final_message = stream.get_final_message()
+                input_tokens = final_message.usage.input_tokens if final_message.usage else 0
+                output_tokens = final_message.usage.output_tokens if final_message.usage else 0
+
+            print()
+            print()
+            total = input_tokens + output_tokens
+            print(f"  {Colors.GRID}Tokens: {input_tokens:,} in / {output_tokens:,} out ({total:,} total){Colors.RESET}")
+            return ""
 
         except Exception as e:
             return Style.error(f"API error: {e}")

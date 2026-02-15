@@ -87,6 +87,35 @@ class ModuleOption:
         return True, ""
 
 
+@dataclass
+class ModuleResult:
+    """Structured result from a module run.
+
+    Modules return this from run() instead of bare bool so that the MCP
+    layer and engagement DB can consume parsed output programmatically.
+    """
+    success: bool
+    output: str = ""                          # Human-readable text output
+    credentials: List[Dict[str, str]] = field(default_factory=list)  # [{username, domain, password|ntlm_hash, source}]
+    targets_found: List[Dict[str, str]] = field(default_factory=list)  # [{ip, hostname, domain, is_dc}]
+    findings: List[Dict[str, str]] = field(default_factory=list)  # [{severity, title, description, evidence}]
+    loot_files: List[str] = field(default_factory=list)  # Paths to saved files
+    raw_data: Dict[str, Any] = field(default_factory=dict)  # Tool-specific parsed data
+    next_modules: List[str] = field(default_factory=list)  # Suggested follow-up module paths
+
+    def to_dict(self) -> dict:
+        return {
+            "success": self.success,
+            "output": self.output,
+            "credentials": self.credentials,
+            "targets_found": self.targets_found,
+            "findings": self.findings,
+            "loot_files": self.loot_files,
+            "raw_data": self.raw_data,
+            "next_modules": self.next_modules,
+        }
+
+
 class ModuleBase(ABC):
     """
     Base class for all UwU Toolkit modules
@@ -126,12 +155,30 @@ class ModuleBase(ABC):
         self.references: List[str] = []
         self.tags: List[str] = []
 
+        # OPSEC metadata
+        self.opsec_rating: Optional[str] = None  # stealth/low/medium/high/loud
+        self.opsec_notes: str = ""
+
+        # Tool dependencies — checked at run time by check()
+        self.requires_tools: List[str] = []
+
+        # Data flow declarations (for AI agent planning)
+        self.provides: List[str] = []   # e.g. ["credentials", "targets"]
+        self.consumes: List[str] = []   # e.g. ["credentials"]
+
+        # Suggested next modules after this one completes
+        self.suggested_next: List[Tuple[str, str]] = []  # [(module_path, reason)]
+
         # Module options
         self._options: Dict[str, ModuleOption] = {}
 
         # Runtime
         self._config = None  # Will be set by console
         self._output: List[str] = []
+
+        # Suggested modules (populated by modules like bloodhound_edges)
+        # List of (module_path, description) tuples, 0-indexed internally
+        self._suggested_modules: List[Tuple[str, str]] = []
 
     @property
     def full_path(self) -> str:
@@ -145,13 +192,9 @@ class ModuleBase(ABC):
         self._load_global_values()
 
     def _load_global_values(self) -> None:
-        """Load global variable values into options"""
-        if not self._config:
-            return
-        for name, opt in self._options.items():
-            global_val = self._config.get(name)
-            if global_val is not None and opt.value is None:
-                opt.value = global_val
+        """No-op: globals are resolved live in get_option() via config fallback.
+        This avoids stale cached values when globals change after module load."""
+        pass
 
     # =========================================================================
     # Option Management
@@ -196,7 +239,8 @@ class ModuleBase(ABC):
             # Module-specific value takes precedence
             if opt.value is not None:
                 value = opt.value
-            # Then check config (globals/session vars/permanent)
+            # Then check config (globals/session vars/permanent) — always
+            # re-check config in case globals changed after module load
             elif self._config:
                 config_val = self._config.get(name)
                 if config_val is not None:
@@ -555,11 +599,16 @@ class ModuleBase(ABC):
     def check(self) -> bool:
         """
         Optional check method to verify target is vulnerable
-        before running the exploit
+        before running the exploit. Also validates required tools are present.
 
         Returns:
             True if target appears vulnerable, False otherwise
         """
+        if self.requires_tools:
+            ok, missing = self.check_tools()
+            if not ok:
+                self.print_error(f"Missing required tools: {', '.join(missing)}")
+                return False
         return True
 
     def cleanup(self) -> None:
@@ -568,6 +617,44 @@ class ModuleBase(ABC):
         Use for cleaning up resources, temporary files, etc.
         """
         pass
+
+    def opsec_warning(self) -> str:
+        """Get OPSEC warning for this module.
+
+        Checks both module-level opsec_rating and the OPSEC registry
+        for any tools this module uses.
+        """
+        lines = []
+
+        # Module-level rating
+        if self.opsec_rating:
+            lines.append(f"Module OPSEC: {self.opsec_rating.upper()}")
+            if self.opsec_notes:
+                lines.append(f"  {self.opsec_notes}")
+
+        # Check tools against OPSEC registry
+        try:
+            from core.opsec import get_opsec_info, format_opsec_warning
+            for tool in self.requires_tools:
+                info = get_opsec_info(tool)
+                if info:
+                    lines.append(format_opsec_warning(tool))
+        except ImportError:
+            pass
+
+        return "\n".join(lines) if lines else ""
+
+    def check_tools(self) -> Tuple[bool, List[str]]:
+        """Verify that all required external tools are available.
+
+        Returns:
+            (all_found, list_of_missing_tool_names)
+        """
+        missing = []
+        for tool_name in self.requires_tools:
+            if not find_tool(tool_name):
+                missing.append(tool_name)
+        return len(missing) == 0, missing
 
     # =========================================================================
     # Module Info
@@ -582,11 +669,34 @@ class ModuleBase(ABC):
             f"   Platform: {self.platform.value}",
             f"     Author: {self.author}",
             f"    Version: {self.version}",
-            "",
-            f"Description:",
-            f"  {self.description}",
-            "",
         ]
+
+        if self.opsec_rating:
+            lines.append(f"      OPSEC: {self.opsec_rating.upper()}")
+
+        lines.append("")
+        lines.append(f"Description:")
+        lines.append(f"  {self.description}")
+        lines.append("")
+
+        if self.requires_tools:
+            ok, missing = self.check_tools()
+            status = "OK" if ok else f"MISSING: {', '.join(missing)}"
+            lines.append(f"Required Tools: {', '.join(self.requires_tools)} [{status}]")
+            lines.append("")
+
+        if self.provides or self.consumes:
+            if self.provides:
+                lines.append(f"  Provides: {', '.join(self.provides)}")
+            if self.consumes:
+                lines.append(f"  Consumes: {', '.join(self.consumes)}")
+            lines.append("")
+
+        if self.suggested_next:
+            lines.append("Suggested Next:")
+            for mod_path, reason in self.suggested_next:
+                lines.append(f"  -> {mod_path}: {reason}")
+            lines.append("")
 
         if self.references:
             lines.append("References:")

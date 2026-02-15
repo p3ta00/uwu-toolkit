@@ -35,8 +35,17 @@ _site/
 # Credentials and secrets
 *.cfg
 *.ccache
+*.pfx
 ligolo-ng.yaml
 sliver-client/
+
+# Test/lab resource files
+iron_throne*.rc
+spot_test.rc
+changepasswd_test*.rc
+
+# Completion backups
+*.bak
 
 # IDE
 .vscode/

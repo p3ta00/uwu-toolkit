@@ -3,8 +3,9 @@ Custom Linux Reconnaissance Module
 Comprehensive Linux enumeration without external tools
 """
 
+import base64
 import os
-import subprocess
+import shlex
 from datetime import datetime
 from typing import Optional, List, Tuple, Dict
 from core.module_base import ModuleBase, ModuleType, Platform
@@ -241,42 +242,26 @@ find / -name ".git" -type d 2>/dev/null | head -10
         os.makedirs(loot_dir, exist_ok=True)
         return loot_dir
 
-    def _build_ssh_cmd(self, script: str) -> List[str]:
-        """Build SSH command"""
+    def _build_ssh_cmd(self, script: str) -> str:
+        """Build SSH command string for execution via run_in_exegol"""
         host = self.get_option("RHOST")
         port = self.get_option("RPORT")
         user = self.get_option("USERNAME")
         password = self.get_option("PASSWORD")
         ssh_key = self.get_option("SSH_KEY")
 
-        base_opts = [
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=10",
-            "-p", str(port),
-        ]
+        base_opts = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10"
+
+        # Use base64 encoding to safely pass multiline scripts
+        encoded = base64.b64encode(script.encode()).decode()
+        remote_cmd = f"echo {encoded} | base64 -d | bash"
 
         if ssh_key:
-            return ["ssh", "-i", ssh_key] + base_opts + [f"{user}@{host}", f"bash -c '{script}'"]
+            return f"ssh -i {shlex.quote(ssh_key)} {base_opts} -p {port} {user}@{host} {shlex.quote(remote_cmd)}"
         elif password:
-            return ["sshpass", "-p", password, "ssh"] + base_opts + [f"{user}@{host}", f"bash -c '{script}'"]
+            return f"sshpass -p {shlex.quote(password)} ssh {base_opts} -p {port} {user}@{host} {shlex.quote(remote_cmd)}"
         else:
-            return ["ssh"] + base_opts + [f"{user}@{host}", f"bash -c '{script}'"]
-
-    def _run_via_exegol(self, cmd: List[str], timeout: int = 60) -> Tuple[int, str, str]:
-        """Run command via Exegol if configured"""
-        if container:
-            full_cmd = ["docker", "exec", container] + cmd
-        else:
-            full_cmd = cmd
-
-        try:
-            result = subprocess.run(full_cmd, capture_output=True, text=True, timeout=timeout)
-            return result.returncode, result.stdout, result.stderr
-        except subprocess.TimeoutExpired:
-            return -1, "", "Command timed out"
-        except Exception as e:
-            return -1, "", str(e)
+            return f"ssh {base_opts} -p {port} {user}@{host} {shlex.quote(remote_cmd)}"
 
     def _run_section(self, section: str) -> str:
         """Run a single enumeration section"""
@@ -286,8 +271,8 @@ find / -name ".git" -type d 2>/dev/null | head -10
         script = self.ENUM_SCRIPTS[section]
         timeout = int(self.get_option("TIMEOUT"))
 
-        ssh_cmd = self._build_ssh_cmd(script)
-        ret, out, err = self._run_via_exegol(ssh_cmd, timeout)
+        cmd = self._build_ssh_cmd(script)
+        ret, out, err = self.run_in_exegol(cmd, timeout=timeout)
 
         if ret != 0 and not out:
             return f"Error running {section}: {err}"
@@ -427,8 +412,8 @@ find / -name ".git" -type d 2>/dev/null | head -10
 
     def check(self) -> bool:
         """Check SSH connectivity"""
-        ssh_cmd = self._build_ssh_cmd("echo test")
-        ret, out, err = self._run_via_exegol(ssh_cmd, timeout=15)
+        cmd = self._build_ssh_cmd("echo test")
+        ret, out, err = self.run_in_exegol(cmd, timeout=15)
 
         if ret == 0 and 'test' in out:
             self.print_good("SSH connection successful")
@@ -436,3 +421,6 @@ find / -name ".git" -type d 2>/dev/null | head -10
 
         self.print_error(f"SSH connection failed: {err}")
         return False
+
+
+module = LinuxRecon()

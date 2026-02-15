@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+#
+# uwu-navi - Launch navi with CTF credentials loaded
+# Part of the uwu-* CTF toolkit
+#
+
+set -e
+
+# Colors for output (Dracula theme)
+CYAN='\033[38;2;139;233;253m'
+GREEN='\033[38;2;80;250;123m'
+ORANGE='\033[38;2;255;184;108m'
+PINK='\033[38;2;255;121;198m'
+PURPLE='\033[38;2;189;147;249m'
+RED='\033[38;2;255;85;85m'
+YELLOW='\033[38;2;241;250;140m'
+RESET='\033[0m'
+
+# Function to show help
+show_help() {
+    cat << EOF
+
+${PURPLE}╔═══════════════════════════════════════════════════════════╗
+║                                                           ║
+║        ${PINK}🚀 uwu-navi - Navi with Credentials 🚀${PURPLE}           ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝${RESET}
+
+${GREEN}USAGE:${RESET}
+    ${CYAN}uwu-navi${RESET}              Launch navi with loaded credentials
+    ${CYAN}uwu-navi${RESET} ${YELLOW}show${RESET}         Show currently selected credentials
+    ${CYAN}uwu-navi${RESET} ${YELLOW}load${RESET}         Load and display credentials
+    ${CYAN}uwu-navi${RESET} ${YELLOW}env${RESET}          Output export commands for eval
+    ${CYAN}uwu-navi${RESET} ${YELLOW}-h${RESET}           Show this help
+
+${GREEN}DESCRIPTION:${RESET}
+    Launch navi with your pwned and target credentials automatically
+    loaded as environment variables. Perfect for quick reference during
+    CTF challenges.
+
+    ${YELLOW}Note:${RESET} Commands selected in navi will be executed automatically.
+    The database (.ctf/credentials.db) is loaded from your current
+    working directory, so you can have different databases per CTF.
+
+${GREEN}EXAMPLES:${RESET}
+    ${COMMENT}# Launch navi with credentials${RESET}
+    ${CYAN}uwu-navi${RESET}
+
+    ${COMMENT}# Load credentials into current shell${RESET}
+    ${CYAN}eval \$(uwu-navi env)${RESET}
+
+    ${COMMENT}# Show what's selected${RESET}
+    ${CYAN}uwu-navi show${RESET}
+
+${GREEN}ENVIRONMENT VARIABLES:${RESET}
+    ${YELLOW}PWNED_USER${RESET}       - Username of compromised account
+    ${YELLOW}PWNED_DOMAIN${RESET}     - Domain of compromised account
+    ${YELLOW}PWNED_PASS${RESET}       - Password of compromised account
+    ${YELLOW}PWNED_HASH${RESET}       - NTLM hash of compromised account
+    ${YELLOW}PWNED_MACHINE${RESET}    - Machine where creds were found
+    ${YELLOW}TARGET_USER${RESET}      - Username of target account
+    ${YELLOW}TARGET_DOMAIN${RESET}    - Domain of target account
+    ${YELLOW}TARGET_MACHINE${RESET}   - Target machine
+
+${GREEN}WORKFLOW:${RESET}
+    ${CYAN}1.${RESET} Add credentials:     ${CYAN}uwu-loot <machine> <user> -p <pass>${RESET}
+    ${CYAN}2.${RESET} List credentials:    ${CYAN}uwu-list${RESET}
+    ${CYAN}3.${RESET} Mark as pwned:       ${CYAN}uwu-pwned <id>${RESET}
+    ${CYAN}4.${RESET} Mark as target:      ${CYAN}uwu-target <id>${RESET}
+    ${CYAN}5.${RESET} Launch navi:         ${CYAN}uwu-navi${RESET}
+
+${GREEN}RELATED TOOLS:${RESET}
+    ${CYAN}uwu-loot${RESET}      Add credentials to database
+    ${CYAN}uwu-list${RESET}      List all credentials
+    ${CYAN}uwu-pwned${RESET}     Mark compromised credentials
+    ${CYAN}uwu-target${RESET}    Mark target credentials
+    ${CYAN}uwu-export${RESET}    Export to environment variables
+
+EOF
+}
+
+# Function to show current selection
+show_selection() {
+    echo -e "${PURPLE}════════════════════════════════════════════════════════════${RESET}"
+    echo -e "${PINK}  Current CTF Credentials Selection${RESET}"
+    echo -e "${PURPLE}════════════════════════════════════════════════════════════${RESET}"
+    uwu-list --selected
+}
+
+# Function to load and export credentials
+load_credentials() {
+    # Export the credentials
+    eval $(uwu-export 2>/dev/null)
+
+    # Check if credentials were loaded
+    if [ -n "$PWNED_USER" ] || [ -n "$TARGET_USER" ]; then
+        echo -e "${GREEN}✓ Credentials loaded!${RESET}\n"
+
+        if [ -n "$PWNED_USER" ]; then
+            echo -e "${GREEN}PWNED:${RESET}"
+            echo -e "  User:     ${CYAN}$PWNED_USER${RESET}"
+            [ -n "$PWNED_DOMAIN" ] && echo -e "  Domain:   ${PURPLE}$PWNED_DOMAIN${RESET}"
+            [ -n "$PWNED_MACHINE" ] && echo -e "  Machine:  ${ORANGE}$PWNED_MACHINE${RESET}"
+            [ -n "$PWNED_PASS" ] && echo -e "  Password: ${YELLOW}***${RESET}"
+            [ -n "$PWNED_HASH" ] && echo -e "  Hash:     ${YELLOW}${PWNED_HASH:0:20}...${RESET}"
+            echo ""
+        fi
+
+        if [ -n "$TARGET_USER" ]; then
+            echo -e "${RED}TARGET:${RESET}"
+            echo -e "  User:     ${CYAN}$TARGET_USER${RESET}"
+            [ -n "$TARGET_DOMAIN" ] && echo -e "  Domain:   ${PURPLE}$TARGET_DOMAIN${RESET}"
+            [ -n "$TARGET_MACHINE" ] && echo -e "  Machine:  ${ORANGE}$TARGET_MACHINE${RESET}"
+            echo ""
+        fi
+    else
+        echo -e "${YELLOW}No credentials selected.${RESET}"
+        echo -e "Use ${CYAN}uwu-pwned${RESET} and ${CYAN}uwu-target${RESET} to mark credentials.\n"
+    fi
+}
+
+# Function to launch navi with loaded credentials
+launch_navi() {
+    # Check if navi is installed
+    if ! command -v navi &> /dev/null; then
+        echo -e "${RED}Error: navi is not installed${RESET}"
+        echo -e "${YELLOW}Install with: cargo install navi${RESET}"
+        exit 1
+    fi
+
+    # Load credentials silently
+    eval $(uwu-export 2>/dev/null)
+
+    # Export credentials and launch navi
+    export PWNED_USER PWNED_DOMAIN PWNED_PASS PWNED_HASH PWNED_MACHINE
+    export TARGET_USER TARGET_DOMAIN TARGET_MACHINE
+
+    # Launch navi with --print and execute the command
+    local cmd
+    cmd=$(navi --print "$@")
+
+    if [ -n "$cmd" ]; then
+        echo -e "${CYAN}Executing:${RESET} ${YELLOW}$cmd${RESET}"
+
+        # Add to zsh history (only if running zsh)
+        if [ -n "$ZSH_VERSION" ]; then
+            print -s "$cmd"
+        fi
+
+        # Execute the command
+        eval "$cmd"
+    fi
+}
+
+# Parse command line arguments
+case "${1:-}" in
+    "show"|"list")
+        show_selection
+        ;;
+    "env"|"export")
+        # Just output the export commands for eval
+        uwu-export 2>/dev/null
+        ;;
+    "load")
+        load_credentials
+        ;;
+    "help"|"-h"|"--help")
+        show_help
+        ;;
+    *)
+        # Default: launch navi
+        launch_navi "$@"
+        ;;
+esac

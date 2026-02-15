@@ -3,12 +3,13 @@ Module loader and manager for UwU Toolkit
 Handles discovery, loading, and searching of modules
 """
 
+import ast
 import os
 import sys
 import importlib.util
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .module_base import ModuleBase, ModuleType
 
@@ -16,7 +17,7 @@ from .module_base import ModuleBase, ModuleType
 @dataclass
 class ModuleInfo:
     """Lightweight module metadata (loaded without instantiating)"""
-    path: str  # Full path like "auxiliary/scanner/smb_enum"
+    path: str  # Full path like "impacket/psexec" or "ad/kerberoast"
     file_path: Path  # Actual file path
     name: str
     description: str
@@ -24,6 +25,7 @@ class ModuleInfo:
     tags: List[str]
     platform: str
     author: str
+    virtual_key: str = ""  # For registry-based virtual modules (e.g., "psexec")
 
 
 class ModuleLoader:
@@ -33,27 +35,62 @@ class ModuleLoader:
         self.modules_path = Path(modules_path)
         self._module_cache: Dict[str, ModuleInfo] = {}
         self._loaded_modules: Dict[str, ModuleBase] = {}
+        # Map old paths to new paths for backward compatibility
+        self._path_aliases: Dict[str, str] = {}
 
     def discover_modules(self) -> Dict[str, ModuleInfo]:
         """
-        Discover all available modules
+        Discover all available modules.
+
+        Scans ModuleType directories (auxiliary/, exploits/, etc.) and
+        any additional top-level directories (impacket/, bloodyad/, ad/).
+        Also registers virtual modules from base class registries.
 
         Returns dict of module_path -> ModuleInfo
         """
         self._module_cache.clear()
+        self._path_aliases.clear()
 
+        type_dir_names = {mt.value for mt in ModuleType}
+
+        # Phase 1: Scan ModuleType directories (auxiliary/, exploits/, etc.)
         for module_type in ModuleType:
             type_dir = self.modules_path / module_type.value
             if not type_dir.exists():
                 type_dir.mkdir(parents=True, exist_ok=True)
                 continue
-
             self._scan_directory(type_dir, module_type)
+
+        # Phase 2: Scan additional top-level directories (impacket/, bloodyad/, ad/, etc.)
+        for item in sorted(self.modules_path.iterdir()):
+            if (item.is_dir() and
+                not item.name.startswith(('_', '.')) and
+                item.name not in type_dir_names):
+                self._scan_directory(item, ModuleType.AUXILIARY, path_root=item.name)
+
+        # Phase 3: Register virtual modules from base class registries
+        self._register_virtual_modules()
 
         return self._module_cache
 
-    def _scan_directory(self, directory: Path, module_type: ModuleType, prefix: str = "") -> None:
-        """Recursively scan directory for modules"""
+    def _scan_directory(
+        self,
+        directory: Path,
+        module_type: ModuleType,
+        prefix: str = "",
+        path_root: str = "",
+    ) -> None:
+        """Recursively scan directory for modules.
+
+        Args:
+            directory: Directory to scan
+            module_type: Module type for metadata
+            prefix: Current subdirectory prefix within the scan
+            path_root: Override for the root path segment (e.g., "impacket"
+                       instead of module_type.value)
+        """
+        root = path_root if path_root else module_type.value
+
         for item in directory.iterdir():
             if item.name.startswith("_") or item.name.startswith("."):
                 continue
@@ -61,19 +98,76 @@ class ModuleLoader:
             if item.is_dir():
                 # Recurse into subdirectories
                 new_prefix = f"{prefix}/{item.name}" if prefix else item.name
-                self._scan_directory(item, module_type, new_prefix)
+                self._scan_directory(item, module_type, new_prefix, path_root=root)
 
             elif item.suffix == ".py":
                 # Found a module file
                 module_name = item.stem
                 if prefix:
-                    full_path = f"{module_type.value}/{prefix}/{module_name}"
+                    full_path = f"{root}/{prefix}/{module_name}"
                 else:
-                    full_path = f"{module_type.value}/{module_name}"
+                    full_path = f"{root}/{module_name}"
 
                 info = self._extract_module_info(item, full_path, module_type)
                 if info:
                     self._module_cache[full_path] = info
+
+    def _register_virtual_modules(self) -> None:
+        """Scan for base files with VIRTUAL_MODULES registries.
+
+        Base files (named _*_base.py or _base.py) can export a
+        VIRTUAL_MODULES dict to auto-register tool wrappers without
+        needing individual stub files.
+        """
+        for base_file in self.modules_path.rglob("_*_base.py"):
+            try:
+                content = base_file.read_text()
+                if "VIRTUAL_MODULES" not in content:
+                    continue
+
+                # Import the base file to get the registry
+                mod_name = f"_uwu_base_{base_file.stem}"
+                spec = importlib.util.spec_from_file_location(mod_name, base_file)
+                if not spec or not spec.loader:
+                    continue
+                mod = importlib.util.module_from_spec(spec)
+                # Avoid polluting sys.modules with temp name
+                old_mod = sys.modules.get(mod_name)
+                sys.modules[mod_name] = mod
+                spec.loader.exec_module(mod)
+
+                vm = getattr(mod, "VIRTUAL_MODULES", None)
+                if not vm or not isinstance(vm, dict):
+                    continue
+
+                for vpath, vinfo in vm.items():
+                    if vpath in self._module_cache:
+                        continue  # Real file takes precedence
+                    self._module_cache[vpath] = ModuleInfo(
+                        path=vpath,
+                        file_path=base_file,
+                        name=vinfo.get("name", vpath.split("/")[-1]),
+                        description=vinfo.get("description", "No description"),
+                        module_type=ModuleType.AUXILIARY,
+                        tags=vinfo.get("tags", []),
+                        platform=vinfo.get("platform", "windows"),
+                        author=vinfo.get("author", "UwU Toolkit"),
+                        virtual_key=vinfo.get("tool_key", ""),
+                    )
+
+                    # Register backward-compat alias if applicable
+                    alias = vinfo.get("alias", "")
+                    if alias and alias != vpath:
+                        self._path_aliases[alias] = vpath
+
+                # Clean up
+                if old_mod is not None:
+                    sys.modules[mod_name] = old_mod
+                else:
+                    sys.modules.pop(mod_name, None)
+
+            except Exception as e:
+                print(f"[!] Error loading virtual modules from {base_file}: {e}")
 
     def _extract_module_info(
         self,
@@ -141,39 +235,64 @@ class ModuleLoader:
                 start = line.index("[")
                 end = line.rindex("]") + 1
                 list_str = line[start:end]
-                # Safe eval for simple lists
-                return eval(list_str)
+                return ast.literal_eval(list_str)
         except:
             pass
         return []
+
+    def _resolve_path(self, module_path: str) -> str:
+        """Resolve a module path, handling aliases and backward compatibility."""
+        # Direct match
+        if module_path in self._module_cache:
+            return module_path
+
+        # Check aliases (old path -> new path)
+        if module_path in self._path_aliases:
+            return self._path_aliases[module_path]
+
+        # Backward compat: try stripping "auxiliary/" prefix
+        # e.g., "auxiliary/impacket/psexec" -> "impacket/psexec"
+        if module_path.startswith("auxiliary/"):
+            alt = module_path[len("auxiliary/"):]
+            if alt in self._module_cache:
+                return alt
+
+        return module_path
 
     def load_module(self, module_path: str) -> Optional[ModuleBase]:
         """
         Load and instantiate a module by path
 
         Args:
-            module_path: Full module path (e.g., "auxiliary/scanner/smb_enum")
+            module_path: Full module path (e.g., "impacket/psexec", "ad/kerberoast")
 
         Returns:
             Instantiated module or None if not found/error
         """
-        # Check cache first
-        if module_path in self._loaded_modules:
-            return self._loaded_modules[module_path]
+        # Resolve aliases and backward-compat paths
+        resolved = self._resolve_path(module_path)
+
+        # Check loaded cache
+        if resolved in self._loaded_modules:
+            return self._loaded_modules[resolved]
 
         # Find module info
-        if module_path not in self._module_cache:
-            # Try to discover
+        if resolved not in self._module_cache:
             self.discover_modules()
-            if module_path not in self._module_cache:
+            resolved = self._resolve_path(module_path)
+            if resolved not in self._module_cache:
                 return None
 
-        info = self._module_cache[module_path]
+        info = self._module_cache[resolved]
+
+        # Virtual module: instantiate base class with tool_key
+        if info.virtual_key:
+            return self._load_virtual_module(info, resolved)
 
         try:
             # Load the module file
             spec = importlib.util.spec_from_file_location(
-                f"uwu_modules.{module_path.replace('/', '.')}",
+                f"uwu_modules.{resolved.replace('/', '.')}",
                 info.file_path
             )
             if not spec or not spec.loader:
@@ -183,36 +302,143 @@ class ModuleLoader:
             sys.modules[spec.name] = module
             spec.loader.exec_module(module)
 
-            # Find the module class (should be the first ModuleBase subclass)
-            module_class = None
+            # Find and instantiate the module class
+            # Try each ModuleBase subclass - skip base classes that require args
+            candidates = []
             for attr_name in dir(module):
+                if attr_name.startswith('_'):
+                    continue
                 attr = getattr(module, attr_name)
                 if (isinstance(attr, type) and
                     issubclass(attr, ModuleBase) and
                     attr is not ModuleBase):
-                    module_class = attr
-                    break
+                    candidates.append(attr)
 
-            if not module_class:
-                print(f"[!] No ModuleBase subclass found in {module_path}")
+            if not candidates:
+                print(f"[!] No ModuleBase subclass found in {resolved}")
                 return None
 
-            # Instantiate
-            instance = module_class()
-            self._loaded_modules[module_path] = instance
+            # Try to instantiate each candidate - the actual module class
+            # will work, imported base classes requiring args will be skipped
+            instance = None
+            for cls in candidates:
+                try:
+                    instance = cls()
+                    break
+                except TypeError:
+                    continue
+
+            if not instance:
+                print(f"[!] Could not instantiate any class in {resolved}")
+                return None
+
+            self._loaded_modules[resolved] = instance
             return instance
 
         except Exception as e:
-            print(f"[!] Error loading module {module_path}: {e}")
+            print(f"[!] Error loading module {resolved}: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _load_virtual_module(self, info: ModuleInfo, resolved_path: str) -> Optional[ModuleBase]:
+        """Load a virtual module by instantiating the base class with a tool_key."""
+        try:
+            # Load the base file
+            mod_name = f"uwu_modules.{resolved_path.replace('/', '.')}"
+            spec = importlib.util.spec_from_file_location(mod_name, info.file_path)
+            if not spec or not spec.loader:
+                return None
+
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+
+            # Find ModuleBase subclasses that accept a tool_key argument
+            candidates = []
+            for attr_name in dir(module):
+                if attr_name.startswith('_'):
+                    continue
+                attr = getattr(module, attr_name)
+                if (isinstance(attr, type) and
+                    issubclass(attr, ModuleBase) and
+                    attr is not ModuleBase):
+                    candidates.append(attr)
+
+            instance = None
+            for cls in candidates:
+                try:
+                    instance = cls(info.virtual_key)
+                    break
+                except TypeError:
+                    continue
+
+            if not instance:
+                print(f"[!] Could not instantiate virtual module {resolved_path} "
+                      f"(key={info.virtual_key})")
+                return None
+
+            self._loaded_modules[resolved_path] = instance
+            return instance
+
+        except Exception as e:
+            print(f"[!] Error loading virtual module {resolved_path}: {e}")
             import traceback
             traceback.print_exc()
             return None
 
     def reload_module(self, module_path: str) -> Optional[ModuleBase]:
         """Reload a module (useful during development)"""
-        if module_path in self._loaded_modules:
-            del self._loaded_modules[module_path]
-        return self.load_module(module_path)
+        resolved = self._resolve_path(module_path)
+
+        # Remove from loaded cache
+        if resolved in self._loaded_modules:
+            del self._loaded_modules[resolved]
+
+        # Clear from sys.modules so Python actually re-reads the file
+        mod_name = f"uwu_modules.{resolved.replace('/', '.')}"
+        to_remove = [k for k in sys.modules if k.startswith(mod_name) or k == mod_name]
+        for k in to_remove:
+            del sys.modules[k]
+
+        # Also clear base modules that may have been updated
+        if resolved in self._module_cache:
+            info = self._module_cache[resolved]
+            base_dir = info.file_path.parent
+            # Clear any _*_base modules from the same directory
+            for k in list(sys.modules.keys()):
+                if hasattr(sys.modules[k], '__file__') and sys.modules[k].__file__:
+                    mod_file = sys.modules[k].__file__
+                    if mod_file and str(base_dir) in mod_file and '_base' in mod_file:
+                        del sys.modules[k]
+
+        return self.load_module(resolved)
+
+    def reload_all(self) -> int:
+        """Reload all modules - rediscover and clear all caches.
+
+        Returns: number of modules discovered
+        """
+        # Clear all caches
+        self._loaded_modules.clear()
+
+        # Clear all uwu module entries from sys.modules
+        to_remove = [k for k in sys.modules if k.startswith("uwu_modules.")]
+        for k in to_remove:
+            del sys.modules[k]
+
+        # Also clear any base modules
+        to_remove = [k for k in sys.modules
+                     if k.startswith("modules.") or
+                     k.startswith("_uwu_base_") or
+                     (hasattr(sys.modules[k], '__file__') and sys.modules[k].__file__ and
+                      str(self.modules_path) in str(sys.modules[k].__file__ or ''))]
+        for k in to_remove:
+            del sys.modules[k]
+
+        # Rediscover
+        self.discover_modules()
+        return len(self._module_cache)
 
     def search(
         self,

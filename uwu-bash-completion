@@ -1,0 +1,83 @@
+#!/bin/bash
+# Bash completion for uwu-* CTF tools
+
+_uwu_loot_completion() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    opts="-d --domain -p --password -H --hash -t --hash-type -n --notes -h --help"
+
+    case "${prev}" in
+        -t|--hash-type)
+            COMPREPLY=( $(compgen -W "NTLM MD5 SHA256 SHA1 SHA512" -- ${cur}) )
+            return 0
+            ;;
+        -d|--domain|-p|--password|-H|--hash|-n|--notes)
+            return 0
+            ;;
+        *)
+            COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+            return 0
+            ;;
+    esac
+}
+
+_uwu_list_completion() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+
+    opts="-s --selected -h --help"
+    COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+    return 0
+}
+
+_uwu_pwned_completion() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+
+    opts="clear delete -h --help"
+    COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+    return 0
+}
+
+_uwu_target_completion() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+
+    opts="clear -h --help"
+    COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+    return 0
+}
+
+_uwu_export_completion() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+
+    opts="--show -h --help"
+    COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+    return 0
+}
+
+_uwu_navi_completion() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+
+    opts="show list load env export -h --help"
+    COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+    return 0
+}
+
+# Register completions
+complete -F _uwu_loot_completion uwu-loot
+complete -F _uwu_list_completion uwu-list
+complete -F _uwu_pwned_completion uwu-pwned
+complete -F _uwu_target_completion uwu-target
+complete -F _uwu_export_completion uwu-export
+complete -F _uwu_navi_completion uwu-navi

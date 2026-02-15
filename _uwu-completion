@@ -1,0 +1,132 @@
+#compdef uwu-loot uwu-list uwu-pwned uwu-target uwu-export uwu-navi uwu-parse
+
+# Zsh completion for uwu-* CTF tools
+
+_uwu-loot() {
+  _arguments \
+    '1:machine:' \
+    '2:username:' \
+    '(-d --domain)'{-d,--domain}'[Domain name]:domain:' \
+    '(-p --password)'{-p,--password}'[Password]:password:' \
+    '(-H --hash)'{-H,--hash}'[Hash value]:hash:' \
+    '(-t --hash-type)'{-t,--hash-type}'[Hash type]:type:(NTLM MD5 SHA256 SHA1 SHA512)' \
+    '(-n --notes)'{-n,--notes}'[Notes]:notes:' \
+    '(-h --help)'{-h,--help}'[Show help]'
+}
+
+_uwu-list() {
+  _arguments \
+    '1:machine (optional):' \
+    '(-s --selected)'{-s,--selected}'[Show only pwned and target]' \
+    '(-h --help)'{-h,--help}'[Show help]'
+}
+
+_uwu-pwned() {
+  local -a subcmds
+  subcmds=(
+    'clear:Clear pwned status'
+    'delete:Delete credential'
+  )
+
+  _arguments \
+    '1:id or subcommand:->idorcmd' \
+    '2:id (for subcommands):' \
+    '(-h --help)'{-h,--help}'[Show help]' \
+    && return 0
+
+  case $state in
+    idorcmd)
+      _alternative \
+        'subcmds:subcommand:compadd -a subcmds' \
+        'ids:credential id:'
+      ;;
+  esac
+}
+
+_uwu-target() {
+  local -a subcmds
+  subcmds=(
+    'clear:Clear target status'
+  )
+
+  _arguments \
+    '1:id or subcommand:->idorcmd' \
+    '2:id (for subcommands):' \
+    '(-h --help)'{-h,--help}'[Show help]' \
+    && return 0
+
+  case $state in
+    idorcmd)
+      _alternative \
+        'subcmds:subcommand:compadd -a subcmds' \
+        'ids:credential id:'
+      ;;
+  esac
+}
+
+_uwu-export() {
+  _arguments \
+    '--show[Show variables without exporting]' \
+    '(-h --help)'{-h,--help}'[Show help]'
+}
+
+_uwu-navi() {
+  local -a subcmds
+  subcmds=(
+    'show:Show currently selected credentials'
+    'list:Show currently selected credentials'
+    'load:Load and display credentials'
+    'env:Output export commands for eval'
+    'export:Output export commands for eval'
+  )
+
+  _arguments \
+    '1:subcommand:compadd -a subcmds' \
+    '(-h --help)'{-h,--help}'[Show help]'
+}
+
+_uwu-parse() {
+  local -a parsers
+  parsers=(
+    'auto:Auto-detect parser type'
+    'secretsdump:impacket-secretsdump output'
+    'nxc:NetExec/CrackMapExec output'
+    'cme:CrackMapExec output'
+    'responder:Responder captured hashes'
+    'hashcat:Hashcat potfile or --show'
+    'john:John the Ripper output'
+    'kerbrute:Kerbrute valid users'
+  )
+
+  _arguments \
+    '1:file:_files' \
+    '(-m --machine)'{-m,--machine}'[Target machine]:machine:' \
+    '(-d --domain)'{-d,--domain}'[Domain name]:domain:' \
+    '(-t --type)'{-t,--type}'[Parser type]:type:compadd -a parsers' \
+    '(-h --help)'{-h,--help}'[Show help]'
+}
+
+# Main completion dispatcher
+case "$service" in
+  uwu-loot)
+    _uwu-loot "$@"
+    ;;
+  uwu-list)
+    _uwu-list "$@"
+    ;;
+  uwu-pwned)
+    _uwu-pwned "$@"
+    ;;
+  uwu-target)
+    _uwu-target "$@"
+    ;;
+  uwu-export)
+    _uwu-export "$@"
+    ;;
+  uwu-navi)
+    _uwu-navi "$@"
+    ;;
+  uwu-parse)
+    _uwu-parse "$@"
+    ;;
+esac

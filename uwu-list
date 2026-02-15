@@ -1,0 +1,246 @@
+#!/usr/bin/env python3
+"""
+uwu-list - List CTF credentials from database
+Part of the uwu-* CTF toolkit
+"""
+
+import sqlite3
+import sys
+import os
+from pathlib import Path
+
+# Dracula Theme Colors
+class Colors:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    CYAN = '\033[38;2;139;233;253m'
+    GREEN = '\033[38;2;80;250;123m'
+    ORANGE = '\033[38;2;255;184;108m'
+    PINK = '\033[38;2;255;121;198m'
+    PURPLE = '\033[38;2;189;147;249m'
+    RED = '\033[38;2;255;85;85m'
+    YELLOW = '\033[38;2;241;250;140m'
+    COMMENT = '\033[38;2;98;114;164m'
+
+class CTFCredsDB:
+    def __init__(self):
+        self.db_dir = Path(os.getcwd()) / '.ctf'
+        self.db_path = self.db_dir / 'credentials.db'
+
+    def get_all_credentials(self):
+        """Retrieve all credentials"""
+        if not self.db_path.exists():
+            return []
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT id, machine, username, domain, password, hash, hash_type, notes, status, created_at, updated_at
+            FROM credentials
+            ORDER BY machine, username
+        ''')
+
+        results = cursor.fetchall()
+        conn.close()
+        return results
+
+    def get_by_machine(self, machine):
+        """Get credentials for a specific machine"""
+        if not self.db_path.exists():
+            return []
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT id, machine, username, domain, password, hash, hash_type, notes, status, created_at, updated_at
+            FROM credentials
+            WHERE machine LIKE ?
+            ORDER BY username
+        ''', (f'%{machine}%',))
+
+        results = cursor.fetchall()
+        conn.close()
+        return results
+
+    def get_pwned(self):
+        """Get the credential marked as pwned"""
+        if not self.db_path.exists():
+            return None
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT id, machine, username, domain, password, hash, hash_type, notes, status, created_at, updated_at
+            FROM credentials
+            WHERE status = 'pwned'
+            LIMIT 1
+        ''')
+
+        result = cursor.fetchone()
+        conn.close()
+        return result
+
+    def get_target(self):
+        """Get the credential marked as target"""
+        if not self.db_path.exists():
+            return None
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            SELECT id, machine, username, domain, password, hash, hash_type, notes, status, created_at, updated_at
+            FROM credentials
+            WHERE status = 'target'
+            LIMIT 1
+        ''')
+
+        result = cursor.fetchone()
+        conn.close()
+        return result
+
+def print_banner():
+    """Print the tool banner"""
+    banner = f"""
+{Colors.PURPLE}╔═══════════════════════════════════════════════════════════╗
+║                                                           ║
+║          {Colors.PINK}📋 uwu-list - View CTF Credentials 📋{Colors.PURPLE}           ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝{Colors.RESET}
+"""
+    print(banner)
+
+def print_help():
+    """Print usage help"""
+    help_text = f"""
+{Colors.PURPLE}╔═══════════════════════════════════════════════════════════╗
+║                                                           ║
+║          {Colors.PINK}📋 uwu-list - View CTF Credentials 📋{Colors.PURPLE}           ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝{Colors.RESET}
+
+{Colors.GREEN}USAGE:{Colors.RESET}
+    {Colors.CYAN}uwu-list{Colors.RESET}                 List all credentials
+    {Colors.CYAN}uwu-list{Colors.RESET} {Colors.ORANGE}<machine>{Colors.RESET}      Filter by machine name
+    {Colors.CYAN}uwu-list{Colors.RESET} {Colors.YELLOW}--selected{Colors.RESET}     Show only pwned and target
+    {Colors.CYAN}uwu-list{Colors.RESET} {Colors.YELLOW}-h{Colors.RESET}             Show this help
+
+{Colors.GREEN}OPTIONS:{Colors.RESET}
+    {Colors.YELLOW}-s, --selected{Colors.RESET}        Show only pwned and target credentials
+    {Colors.YELLOW}-h, --help{Colors.RESET}            Show this help message
+
+{Colors.GREEN}EXAMPLES:{Colors.RESET}
+    {Colors.COMMENT}# List all credentials{Colors.RESET}
+    {Colors.CYAN}uwu-list{Colors.RESET}
+
+    {Colors.COMMENT}# Filter by machine{Colors.RESET}
+    {Colors.CYAN}uwu-list{Colors.RESET} {Colors.ORANGE}dc01{Colors.RESET}
+
+    {Colors.COMMENT}# Show only selected (pwned/target){Colors.RESET}
+    {Colors.CYAN}uwu-list{Colors.RESET} {Colors.YELLOW}--selected{Colors.RESET}
+
+{Colors.GREEN}CREDENTIAL STATUS:{Colors.RESET}
+    {Colors.GREEN}pwned{Colors.RESET}      Compromised credentials you can use
+    {Colors.RED}target{Colors.RESET}     Target account you're trying to compromise
+    {Colors.COMMENT}-{Colors.RESET}          No special status
+
+{Colors.GREEN}RELATED TOOLS:{Colors.RESET}
+    {Colors.CYAN}uwu-loot{Colors.RESET}      Add credentials to database
+    {Colors.CYAN}uwu-pwned{Colors.RESET}     Mark credentials as pwned
+    {Colors.CYAN}uwu-target{Colors.RESET}    Mark credentials as target
+    {Colors.CYAN}uwu-export{Colors.RESET}    Export credentials to environment
+"""
+    print(help_text)
+
+def display_credentials(credentials, title="All Credentials"):
+    """Display credentials in a nice Dracula-themed table"""
+    if not credentials:
+        print(f"\n{Colors.YELLOW}No credentials found.{Colors.RESET}\n")
+        return
+
+    print(f"\n{Colors.PINK}{title}{Colors.RESET}")
+    print(f"{Colors.PURPLE}{'═' * 180}{Colors.RESET}")
+    print(f"{Colors.PINK}{Colors.BOLD}{'ID':<5} {'Machine':<25} {'Domain':<15} {'Username':<20} {'Password':<20} {'Hash':<30} {'Type':<10} {'Status':<10}{Colors.RESET}")
+    print(f"{Colors.PURPLE}{'═' * 180}{Colors.RESET}")
+
+    for cred in credentials:
+        cred_id, machine, username, domain, password, hash_val, hash_type, notes, status, created, updated = cred
+
+        # Truncate long values for display
+        machine_display = (machine[:22] + '...') if machine and len(machine) > 25 else (machine or '-')
+        username_display = (username[:17] + '...') if username and len(username) > 20 else (username or '-')
+        domain_display = (domain[:12] + '...') if domain and len(domain) > 15 else (domain or '-')
+        password_display = (password[:17] + '...') if password and len(password) > 20 else (password or '-')
+        hash_display = (hash_val[:27] + '...') if hash_val and len(hash_val) > 30 else (hash_val or '-')
+        hash_type_display = hash_type or '-'
+
+        # Color status based on value
+        if status == 'pwned':
+            status_display = f"{Colors.GREEN}{status:<10}{Colors.RESET}"
+        elif status == 'target':
+            status_display = f"{Colors.RED}{status:<10}{Colors.RESET}"
+        else:
+            status_display = f"{Colors.COMMENT}{'-':<10}{Colors.RESET}"
+
+        print(f"{Colors.CYAN}{cred_id:<5}{Colors.RESET} "
+              f"{Colors.GREEN}{machine_display:<25}{Colors.RESET} "
+              f"{Colors.PURPLE}{domain_display:<15}{Colors.RESET} "
+              f"{Colors.ORANGE}{username_display:<20}{Colors.RESET} "
+              f"{Colors.YELLOW}{password_display:<20}{Colors.RESET} "
+              f"{Colors.PURPLE}{hash_display:<30}{Colors.RESET} "
+              f"{Colors.COMMENT}{hash_type_display:<10}{Colors.RESET} "
+              f"{status_display}")
+
+    print(f"{Colors.PURPLE}{'═' * 180}{Colors.RESET}\n")
+    print(f"{Colors.GREEN}Total: {len(credentials)} credential(s){Colors.RESET}\n")
+
+def main():
+    # Check for help flag
+    if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help', 'help']:
+        print_help()
+        sys.exit(0)
+
+    db = CTFCredsDB()
+
+    # Check if database exists
+    if not db.db_path.exists():
+        print(f"{Colors.YELLOW}No credentials database found.{Colors.RESET}")
+        print(f"Use {Colors.CYAN}uwu-loot{Colors.RESET} to add credentials.\n")
+        sys.exit(0)
+
+    # Show selected credentials
+    if len(sys.argv) > 1 and sys.argv[1] in ['-s', '--selected']:
+        print_banner()
+        pwned = db.get_pwned()
+        target = db.get_target()
+
+        if pwned:
+            print(f"\n{Colors.GREEN}{Colors.BOLD}PWNED CREDENTIAL:{Colors.RESET}")
+            display_credentials([pwned], "")
+        else:
+            print(f"\n{Colors.YELLOW}No pwned credential selected{Colors.RESET}\n")
+
+        if target:
+            print(f"{Colors.RED}{Colors.BOLD}TARGET CREDENTIAL:{Colors.RESET}")
+            display_credentials([target], "")
+        else:
+            print(f"{Colors.YELLOW}No target credential selected{Colors.RESET}\n")
+
+    # Filter by machine
+    elif len(sys.argv) > 1:
+        machine = sys.argv[1]
+        print_banner()
+        credentials = db.get_by_machine(machine)
+        display_credentials(credentials, f"Credentials for: {machine}")
+
+    # Show all
+    else:
+        print_banner()
+        credentials = db.get_all_credentials()
+        display_credentials(credentials)
+
+if __name__ == '__main__':
+    main()

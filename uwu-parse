@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+"""
+uwu-parse - Parse pentesting tool output and add to database
+Part of the uwu-* CTF toolkit
+"""
+
+import sqlite3
+import sys
+import os
+import re
+from pathlib import Path
+
+# Dracula Theme Colors
+class Colors:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    CYAN = '\033[38;2;139;233;253m'
+    GREEN = '\033[38;2;80;250;123m'
+    ORANGE = '\033[38;2;255;184;108m'
+    PINK = '\033[38;2;255;121;198m'
+    PURPLE = '\033[38;2;189;147;249m'
+    RED = '\033[38;2;255;85;85m'
+    YELLOW = '\033[38;2;241;250;140m'
+    COMMENT = '\033[38;2;98;114;164m'
+
+class CTFCredsDB:
+    def __init__(self):
+        self.db_dir = Path(os.getcwd()) / '.ctf'
+        self.db_path = self.db_dir / 'credentials.db'
+        self.init_db()
+
+    def init_db(self):
+        """Initialize the database and create table if it doesn't exist"""
+        self.db_dir.mkdir(exist_ok=True)
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                machine TEXT NOT NULL,
+                username TEXT NOT NULL,
+                domain TEXT,
+                password TEXT,
+                hash TEXT,
+                hash_type TEXT,
+                notes TEXT,
+                status TEXT DEFAULT 'none',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(machine, username, domain)
+            )
+        ''')
+
+        conn.commit()
+        conn.close()
+
+    def add_credential(self, machine, username, password=None, hash_val=None, hash_type=None, domain=None, notes=None):
+        """Add or update a credential entry"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute('''
+                INSERT INTO credentials (machine, username, domain, password, hash, hash_type, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(machine, username, domain) DO UPDATE SET
+                    password = COALESCE(excluded.password, password),
+                    hash = COALESCE(excluded.hash, hash),
+                    hash_type = COALESCE(excluded.hash_type, hash_type),
+                    notes = COALESCE(excluded.notes, notes),
+                    updated_at = CURRENT_TIMESTAMP
+            ''', (machine, username, domain, password, hash_val, hash_type, notes))
+
+            conn.commit()
+            return True
+        except sqlite3.Error as e:
+            print(f"{Colors.RED}Database error: {e}{Colors.RESET}")
+            return False
+        finally:
+            conn.close()
+
+class CredentialParser:
+    """Parse output from various pentesting tools"""
+
+    def __init__(self, machine=None, domain=None):
+        self.machine = machine or "unknown"
+        self.domain = domain
+        self.credentials = []
+
+    def parse_secretsdump(self, text):
+        """Parse impacket-secretsdump output"""
+        found = 0
+
+        # Pattern: DOMAIN\username:RID:LMhash:NThash:::
+        pattern = r'([^:\n]+)\\([^:]+):(\d+):([a-fA-F0-9]{32}):([a-fA-F0-9]{32}):::'
+
+        for match in re.finditer(pattern, text):
+            domain = match.group(1)
+            username = match.group(2)
+            lm_hash = match.group(4)
+            nt_hash = match.group(5)
+
+            # Combine LM:NT format
+            hash_val = f"{lm_hash}:{nt_hash}"
+
+            self.credentials.append({
+                'machine': self.machine,
+                'username': username,
+                'domain': domain if domain != 'LOCAL' else None,
+                'hash': hash_val,
+                'hash_type': 'NTLM',
+                'notes': 'From secretsdump'
+            })
+            found += 1
+
+        return found
+
+    def parse_nxc(self, text):
+        """Parse NetExec/CrackMapExec output"""
+        found = 0
+
+        # Pattern: SMB         10.10.11.123    445    DC01    [+] DOMAIN\user:password
+        pattern = r'\[[\+\*]\]\s+(?:([A-Z0-9_-]+)[\\\/])?([^\s:]+)(?::([^\s]+))?\s*(?:\(([^)]+)\))?'
+
+        for line in text.split('\n'):
+            if '[+]' in line or '[*]' in line:
+                # Try to extract target IP/hostname from line
+                target_match = re.search(r'(\d+\.\d+\.\d+\.\d+)\s+\d+\s+([A-Z0-9_-]+)', line)
+                machine = self.machine
+                if target_match:
+                    machine = target_match.group(1)
+
+                match = re.search(pattern, line)
+                if match:
+                    domain = match.group(1)
+                    username = match.group(2)
+                    password = match.group(3)
+
+                    if username and password:
+                        self.credentials.append({
+                            'machine': machine,
+                            'username': username,
+                            'domain': domain,
+                            'password': password,
+                            'notes': 'From NetExec/CME'
+                        })
+                        found += 1
+
+        return found
+
+    def parse_hashcat_potfile(self, text):
+        """Parse hashcat potfile or --show output"""
+        found = 0
+
+        # Pattern: hash:cracked_password
+        for line in text.split('\n'):
+            if ':' in line:
+                parts = line.strip().split(':')
+                if len(parts) >= 2:
+                    hash_val = parts[0]
+                    password = ':'.join(parts[1:])  # In case password contains :
+
+                    # Determine hash type by length
+                    hash_type = 'Unknown'
+                    if len(hash_val) == 32:
+                        hash_type = 'NTLM or MD5'
+                    elif len(hash_val) == 64:
+                        hash_type = 'SHA256'
+                    elif len(hash_val) == 40:
+                        hash_type = 'SHA1'
+
+                    self.credentials.append({
+                        'machine': self.machine,
+                        'username': 'cracked',
+                        'hash': hash_val,
+                        'password': password,
+                        'hash_type': hash_type,
+                        'notes': 'Cracked from hashcat'
+                    })
+                    found += 1
+
+        return found
+
+    def parse_responder(self, text):
+        """Parse Responder logs"""
+        found = 0
+
+        # Pattern: [+] Listening for events...
+        # [SMB] NTLMv2-SSP Client   : 10.10.11.123
+        # [SMB] NTLMv2-SSP Username : DOMAIN\user
+        # [SMB] NTLMv2-SSP Hash     : user::DOMAIN:...
+
+        current_client = None
+        current_username = None
+
+        for line in text.split('\n'):
+            client_match = re.search(r'Client\s*:\s*(\S+)', line)
+            if client_match:
+                current_client = client_match.group(1)
+
+            username_match = re.search(r'Username\s*:\s*(?:([^\\]+)\\)?(\S+)', line)
+            if username_match:
+                domain = username_match.group(1)
+                current_username = username_match.group(2)
+
+            hash_match = re.search(r'Hash\s*:\s*([^:]+)::([^:]*):([^:]+):([^:]+):(\S+)', line)
+            if hash_match and current_username:
+                username = hash_match.group(1)
+                domain = hash_match.group(2) or None
+                hash_val = line.split('Hash')[1].strip().lstrip(':').strip()
+
+                self.credentials.append({
+                    'machine': current_client or self.machine,
+                    'username': username,
+                    'domain': domain,
+                    'hash': hash_val,
+                    'hash_type': 'NTLMv2',
+                    'notes': 'From Responder'
+                })
+                found += 1
+
+        return found
+
+    def parse_kerbrute(self, text):
+        """Parse kerbrute output"""
+        found = 0
+
+        # Pattern: [+] VALID USERNAME:	 user@domain.local
+        pattern = r'\[\+\]\s+VALID USERNAME:\s+([^@\s]+)(?:@(\S+))?'
+
+        for match in re.finditer(pattern, text):
+            username = match.group(1)
+            domain = match.group(2) or self.domain
+
+            self.credentials.append({
+                'machine': self.machine,
+                'username': username,
+                'domain': domain,
+                'notes': 'Valid user from kerbrute'
+            })
+            found += 1
+
+        return found
+
+    def parse_john(self, text):
+        """Parse John the Ripper output"""
+        found = 0
+
+        # Pattern: password         (user)
+        pattern = r'^(\S+)\s+\(([^)]+)\)'
+
+        for line in text.split('\n'):
+            match = re.match(pattern, line.strip())
+            if match:
+                password = match.group(1)
+                username = match.group(2)
+
+                self.credentials.append({
+                    'machine': self.machine,
+                    'username': username,
+                    'password': password,
+                    'notes': 'Cracked from John'
+                })
+                found += 1
+
+        return found
+
+    def parse_auto(self, text):
+        """Automatically detect format and parse"""
+        total = 0
+
+        # Try each parser
+        parsers = [
+            ('secretsdump', self.parse_secretsdump),
+            ('NetExec/CME', self.parse_nxc),
+            ('Responder', self.parse_responder),
+            ('Kerbrute', self.parse_kerbrute),
+            ('Hashcat', self.parse_hashcat_potfile),
+            ('John', self.parse_john),
+        ]
+
+        for name, parser in parsers:
+            found = parser(text)
+            if found > 0:
+                print(f"{Colors.GREEN}✓ Detected {name} output: {found} credential(s){Colors.RESET}")
+                total += found
+
+        return total
+
+def print_help():
+    """Print usage help"""
+    help_text = f"""
+{Colors.PURPLE}╔═══════════════════════════════════════════════════════════╗
+║                                                           ║
+║       {Colors.PINK}📥 uwu-parse - Parse Tool Output 📥{Colors.PURPLE}           ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝{Colors.RESET}
+
+{Colors.GREEN}USAGE:{Colors.RESET}
+    {Colors.CYAN}command | uwu-parse{Colors.RESET}                          Auto-detect and parse
+    {Colors.CYAN}uwu-parse{Colors.RESET} {Colors.ORANGE}<file>{Colors.RESET}                            Parse from file
+    {Colors.CYAN}uwu-parse{Colors.RESET} {Colors.YELLOW}-m{Colors.RESET} {Colors.ORANGE}<machine>{Colors.RESET}                   Set target machine
+    {Colors.CYAN}uwu-parse{Colors.RESET} {Colors.YELLOW}-d{Colors.RESET} {Colors.ORANGE}<domain>{Colors.RESET}                    Set domain
+    {Colors.CYAN}uwu-parse{Colors.RESET} {Colors.YELLOW}-t{Colors.RESET} {Colors.ORANGE}<type>{Colors.RESET}                      Force parser type
+
+{Colors.GREEN}OPTIONS:{Colors.RESET}
+    {Colors.YELLOW}-m, --machine{Colors.RESET} {Colors.ORANGE}<machine>{Colors.RESET}    Target machine/IP
+    {Colors.YELLOW}-d, --domain{Colors.RESET} {Colors.ORANGE}<domain>{Colors.RESET}      Domain name
+    {Colors.YELLOW}-t, --type{Colors.RESET} {Colors.ORANGE}<type>{Colors.RESET}          Parser type (see below)
+    {Colors.YELLOW}-h, --help{Colors.RESET}                Show this help
+
+{Colors.GREEN}SUPPORTED PARSERS:{Colors.RESET}
+    {Colors.CYAN}secretsdump{Colors.RESET}     impacket-secretsdump output
+    {Colors.CYAN}nxc{Colors.RESET}             NetExec/CrackMapExec output
+    {Colors.CYAN}responder{Colors.RESET}       Responder captured hashes
+    {Colors.CYAN}hashcat{Colors.RESET}         Hashcat potfile or --show
+    {Colors.CYAN}john{Colors.RESET}            John the Ripper output
+    {Colors.CYAN}kerbrute{Colors.RESET}        Kerbrute valid users
+    {Colors.CYAN}auto{Colors.RESET}            Auto-detect (default)
+
+{Colors.GREEN}EXAMPLES:{Colors.RESET}
+    {Colors.COMMENT}# Pipe secretsdump directly{Colors.RESET}
+    {Colors.CYAN}impacket-secretsdump DOMAIN/user:pass@10.10.11.123 | uwu-parse -m 10.10.11.123{Colors.RESET}
+
+    {Colors.COMMENT}# Parse NetExec output{Colors.RESET}
+    {Colors.CYAN}nxc smb 10.10.11.0/24 -u user -p pass | uwu-parse{Colors.RESET}
+
+    {Colors.COMMENT}# Parse saved output file{Colors.RESET}
+    {Colors.CYAN}uwu-parse secretsdump.txt -m dc01.corp.local -d CORP{Colors.RESET}
+
+    {Colors.COMMENT}# Parse hashcat cracked hashes{Colors.RESET}
+    {Colors.CYAN}hashcat -m 1000 hashes.txt rockyou.txt --show | uwu-parse -m target{Colors.RESET}
+
+    {Colors.COMMENT}# Parse from file with specific type{Colors.RESET}
+    {Colors.CYAN}uwu-parse -t responder responder.log -m 10.10.11.123{Colors.RESET}
+
+{Colors.GREEN}WORKFLOW:{Colors.RESET}
+    {Colors.CYAN}1.{Colors.RESET} Run your tool and pipe to uwu-parse
+    {Colors.CYAN}2.{Colors.RESET} Credentials are automatically added to database
+    {Colors.CYAN}3.{Colors.RESET} View with {Colors.CYAN}uwu-list{Colors.RESET}
+    {Colors.CYAN}4.{Colors.RESET} No manual entry needed!
+
+{Colors.GREEN}RELATED TOOLS:{Colors.RESET}
+    {Colors.CYAN}uwu-loot{Colors.RESET}      Add credentials manually
+    {Colors.CYAN}uwu-list{Colors.RESET}      List all credentials
+    {Colors.CYAN}uwu-pwned{Colors.RESET}     Mark compromised credentials
+"""
+    print(help_text)
+
+def main():
+    # Check for help flag
+    if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help', 'help']:
+        print_help()
+        sys.exit(0)
+
+    # Parse arguments
+    machine = None
+    domain = None
+    parser_type = 'auto'
+    input_text = None
+    input_file = None
+
+    i = 1
+    while i < len(sys.argv):
+        if sys.argv[i] in ['-m', '--machine'] and i + 1 < len(sys.argv):
+            machine = sys.argv[i + 1]
+            i += 2
+        elif sys.argv[i] in ['-d', '--domain'] and i + 1 < len(sys.argv):
+            domain = sys.argv[i + 1]
+            i += 2
+        elif sys.argv[i] in ['-t', '--type'] and i + 1 < len(sys.argv):
+            parser_type = sys.argv[i + 1]
+            i += 2
+        else:
+            input_file = sys.argv[i]
+            i += 1
+
+    # Get input from stdin or file
+    if input_file:
+        try:
+            with open(input_file, 'r') as f:
+                input_text = f.read()
+        except Exception as e:
+            print(f"{Colors.RED}Error reading file: {e}{Colors.RESET}")
+            sys.exit(1)
+    elif not sys.stdin.isatty():
+        input_text = sys.stdin.read()
+    else:
+        print(f"{Colors.RED}Error: No input provided{Colors.RESET}")
+        print(f"Use: {Colors.CYAN}command | uwu-parse{Colors.RESET} or {Colors.CYAN}uwu-parse <file>{Colors.RESET}")
+        print(f"Run {Colors.CYAN}uwu-parse -h{Colors.RESET} for help\n")
+        sys.exit(1)
+
+    # Parse the input
+    parser = CredentialParser(machine=machine, domain=domain)
+
+    print(f"\n{Colors.PURPLE}Parsing tool output...{Colors.RESET}\n")
+
+    if parser_type == 'auto':
+        found = parser.parse_auto(input_text)
+    else:
+        parser_map = {
+            'secretsdump': parser.parse_secretsdump,
+            'nxc': parser.parse_nxc,
+            'cme': parser.parse_nxc,
+            'responder': parser.parse_responder,
+            'hashcat': parser.parse_hashcat_potfile,
+            'john': parser.parse_john,
+            'kerbrute': parser.parse_kerbrute,
+        }
+
+        parser_func = parser_map.get(parser_type.lower())
+        if not parser_func:
+            print(f"{Colors.RED}Unknown parser type: {parser_type}{Colors.RESET}")
+            sys.exit(1)
+
+        found = parser_func(input_text)
+
+    if not parser.credentials:
+        print(f"{Colors.YELLOW}No credentials found in input{Colors.RESET}\n")
+        sys.exit(0)
+
+    # Add to database
+    db = CTFCredsDB()
+    added = 0
+
+    for cred in parser.credentials:
+        # Rename 'hash' key to 'hash_val' for function compatibility
+        if 'hash' in cred:
+            cred['hash_val'] = cred.pop('hash')
+
+        if db.add_credential(**cred):
+            added += 1
+
+    print(f"\n{Colors.GREEN}✓ Added {added} credential(s) to database{Colors.RESET}")
+    print(f"Run {Colors.CYAN}uwu-list{Colors.RESET} to view them\n")
+
+if __name__ == '__main__':
+    main()

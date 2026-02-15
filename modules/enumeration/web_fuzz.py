@@ -1,163 +1,142 @@
 """
-Web Fuzzing Module - Directory, Vhost, and Subdomain Discovery
-Supports feroxbuster, ffuf, and gobuster backends
-
-Based on methodology from:
-- The Hacker Recipes
-- OSCP best practices
-- Bug bounty techniques
+Web Fuzzing Module - Directory and File Discovery
+Supports feroxbuster, ffuf, and gobuster backends with auto-detection.
+Runs directory/file fuzzing with configurable extensions, filters, and recursion.
 """
 
 import subprocess
 import shutil
+import shlex
 import os
 import re
 from typing import List, Optional, Dict
 from datetime import datetime
-from core.module_base import ModuleBase, ModuleType, Platform
+from core.module_base import ModuleBase, ModuleType, Platform, find_tool
 from core.wordlists import resolve_wordlist, WordlistResolver
 
 
 class WebFuzz(ModuleBase):
     """
-    Web fuzzing module supporting:
-    - Directory bruteforce
-    - Virtual host (vhost) discovery
-    - Subdomain enumeration
+    Web fuzzing module for directory and file discovery.
 
-    Uses feroxbuster, ffuf, or gobuster as backend
+    Auto mode picks the best available tool: feroxbuster > ffuf > gobuster.
+    Supports recursive scanning, extension lists, response filtering, and
+    multiple output formats.
     """
 
-    # File extensions by technology
+    # File extension presets by technology
     EXTENSIONS = {
-        "php": ".php,.php5,.php7,.phtml,.inc",
-        "asp": ".asp,.aspx,.ashx,.asmx,.config",
-        "jsp": ".jsp,.jspx,.do,.action",
-        "cgi": ".cgi,.pl,.py,.sh",
-        "html": ".html,.htm,.shtml",
-        "txt": ".txt,.md,.log,.bak,.old,.swp",
-        "backup": ".bak,.old,.orig,.backup,.swp,.save,~",
-        "config": ".conf,.config,.ini,.xml,.yaml,.yml,.json,.env",
-        "all": ".php,.asp,.aspx,.jsp,.html,.txt,.bak,.old,.config,.xml,.json",
+        "php": "php,php5,php7,phtml,inc",
+        "asp": "asp,aspx,ashx,asmx,config",
+        "jsp": "jsp,jspx,do,action",
+        "cgi": "cgi,pl,py,sh",
+        "html": "html,htm,shtml",
+        "txt": "txt,md,log,bak,old,swp",
+        "backup": "bak,old,orig,backup,swp,save",
+        "config": "conf,config,ini,xml,yaml,yml,json,env",
+        "all": "php,asp,aspx,jsp,html,txt,bak,old,config,xml,json",
     }
 
     def __init__(self):
         super().__init__()
         self.name = "web_fuzz"
-        self.description = "Web fuzzing - directories, vhosts, subdomains"
+        self.description = "Web fuzzing - directory and file discovery"
         self.author = "UwU Toolkit"
+        self.version = "2.0.0"
         self.module_type = ModuleType.ENUMERATION
         self.platform = Platform.WEB
-        self.tags = ["web", "fuzzing", "directories", "vhost", "subdomain", "recon"]
+        self.tags = ["web", "fuzzing", "directories", "files", "recon", "enumeration"]
+        self.references = [
+            "https://book.hacktricks.xyz/network-services-pentesting/pentesting-web#directory-file-discovery",
+        ]
 
         # Register options
-        self.register_option("URL", "Target URL (http://target.com)", required=True)
-        self.register_option("MODE", "Fuzzing mode",
-                           default="dir",
-                           choices=["dir", "vhost", "subdomain", "all"])
-        self.register_option("WORDLIST", "Wordlist to use (name or path)",
-                           default="dir_medium")
-        self.register_option("EXTENSIONS", "File extensions (name or custom)",
-                           default="")
-        self.register_option("THREADS", "Number of threads", default="50")
-        self.register_option("TOOL", "Backend tool to use",
-                           default="auto",
-                           choices=["auto", "feroxbuster", "ffuf", "gobuster"])
+        self.register_option("RHOSTS", "Target IP or hostname", required=True)
+        self.register_option("RPORT", "Target port", default="80")
+        self.register_option("URL", "Full URL override (takes precedence over RHOSTS/RPORT)", default="")
+        self.register_option("WORDLIST", "Wordlist name or path (e.g., dir_medium, common)",
+                             default="dir_medium")
+        self.register_option("EXTENSIONS", "File extensions: preset name or comma-separated (e.g., php,txt,bak)",
+                             default="")
+        self.register_option("THREADS", "Number of threads", default="10")
+        self.register_option("TOOL", "Backend fuzzing tool",
+                             default="auto",
+                             choices=["auto", "feroxbuster", "ffuf", "gobuster"])
         self.register_option("RECURSION", "Enable recursive scanning",
-                           default="yes", choices=["yes", "no"])
+                             default="yes", choices=["yes", "no"])
         self.register_option("DEPTH", "Recursion depth", default="2")
+        self.register_option("FILTER_CODE", "Filter response status codes (comma-sep)", default="404")
         self.register_option("FILTER_SIZE", "Filter responses by size (comma-sep)", default="")
-        self.register_option("FILTER_CODE", "Filter status codes (comma-sep)", default="404")
         self.register_option("FILTER_WORDS", "Filter by word count", default="")
-        self.register_option("OUTPUT", "Output directory", default="./web_fuzz_results")
-        self.register_option("DOMAIN", "Domain for vhost/subdomain mode", default="")
+        self.register_option("SSL", "Use HTTPS", default="no", choices=["yes", "no"])
+        self.register_option("FOLLOW_REDIRECT", "Follow redirects",
+                             default="yes", choices=["yes", "no"])
         self.register_option("TIMEOUT", "Request timeout in seconds", default="10")
-        self.register_option("FOLLOW_REDIRECT", "Follow redirects", default="yes", choices=["yes", "no"])
-
-    def run(self) -> bool:
-        url = self.get_option("URL").rstrip("/")
-        mode = self.get_option("MODE")
-        tool = self.get_option("TOOL")
-        output_dir = self.get_option("OUTPUT")
-
-        # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        self.print_line()
-        self.print_good("=" * 60)
-        self.print_good("  Web Fuzzer")
-        self.print_good("=" * 60)
-        self.print_status(f"Target: {url}")
-        self.print_status(f"Mode: {mode}")
-        self.print_line()
-
-        # Detect tool
-        if tool == "auto":
-            tool = self._detect_tool()
-
-        self.print_status(f"Using: {tool}")
-
-        # Run appropriate mode
-        if mode == "dir":
-            return self._fuzz_directories(url, tool, output_dir, timestamp)
-        elif mode == "vhost":
-            return self._fuzz_vhosts(url, tool, output_dir, timestamp)
-        elif mode == "subdomain":
-            return self._fuzz_subdomains(url, tool, output_dir, timestamp)
-        elif mode == "all":
-            self._fuzz_directories(url, tool, output_dir, timestamp)
-            self._fuzz_vhosts(url, tool, output_dir, timestamp)
-            return True
-
-        return False
+        self.register_option("OUTPUT", "Output file for results", default="")
+        self.register_option("EXTRA_ARGS", "Additional tool arguments", default="")
 
     def _detect_tool(self) -> str:
-        """Detect available fuzzing tool"""
+        """Auto-detect the best available fuzzing tool.
+        Priority: feroxbuster > ffuf > gobuster."""
         for tool in ["feroxbuster", "ffuf", "gobuster"]:
-            paths = [f"/opt/tools/bin/{tool}", f"/opt/tools/{tool}/{tool}", f"/usr/bin/{tool}"]
-            for path in paths:
-                if os.path.exists(path):
-                    return tool
-            if shutil.which(tool):
+            if find_tool(tool):
                 return tool
-        return "ffuf"  # Fallback
+            # Check in Exegol
+            ret, stdout, _ = self.run_in_exegol(f"which {tool}", timeout=10)
+            if ret == 0 and stdout.strip():
+                return tool
+        self.print_warning("No fuzzing tool found locally or in Exegol. Defaulting to ffuf.")
+        return "ffuf"
 
-    def _get_tool_path(self, tool: str) -> str:
-        """Get full path to tool"""
-        paths = [f"/opt/tools/bin/{tool}", f"/opt/tools/{tool}/{tool}"]
-        for path in paths:
-            if os.path.exists(path):
-                return path
-        return shutil.which(tool) or tool
-
-    def _get_wordlist(self, wordlist: str) -> str:
-        """Resolve wordlist name to path using cross-platform resolver"""
-        resolved = resolve_wordlist(wordlist, fallback="common")
+    def _resolve_wordlist(self, name: str) -> str:
+        """Resolve wordlist name to a full path."""
+        resolved = resolve_wordlist(name, fallback="common")
         if resolved:
             return resolved
-        # Fallback to direct path if exists
-        if os.path.exists(wordlist):
-            return wordlist
-        self.print_warning(f"Wordlist '{wordlist}' not found, using common.txt fallback")
+        if os.path.exists(name):
+            return name
+        # Try common Exegol paths
+        exegol_paths = [
+            f"/opt/lists/seclists/Discovery/Web-Content/{name}",
+            f"/usr/share/wordlists/seclists/Discovery/Web-Content/{name}",
+            f"/usr/share/wordlists/{name}",
+        ]
+        for p in exegol_paths:
+            if os.path.exists(p):
+                return p
+        self.print_warning(f"Wordlist '{name}' not found locally. Passing to Exegol as-is.")
+        # Return a sensible default that should exist in Exegol
         return resolve_wordlist("common") or "/usr/share/wordlists/dirb/common.txt"
 
-    def _get_extensions(self, ext: str) -> str:
-        """Resolve extension preset to string"""
+    def _resolve_extensions(self, ext: str) -> str:
+        """Resolve extension preset name or return raw extension string."""
         if not ext:
             return ""
         if ext in self.EXTENSIONS:
             return self.EXTENSIONS[ext]
-        return ext
+        # Clean up user input (remove dots, spaces)
+        return ext.replace(".", "").replace(" ", "")
 
-    def _fuzz_directories(self, url: str, tool: str, output_dir: str, timestamp: str) -> bool:
-        """Directory bruteforce"""
-        self.print_line()
-        self.print_good("[Directory Fuzzing]")
-        self.print_line("-" * 40)
+    def _build_url(self) -> str:
+        """Build the target URL from options."""
+        url = self.get_option("URL")
+        if url:
+            return url.rstrip("/")
 
-        wordlist = self._get_wordlist(self.get_option("WORDLIST"))
-        extensions = self._get_extensions(self.get_option("EXTENSIONS"))
+        rhosts = self.get_option("RHOSTS")
+        rport = self.get_option("RPORT")
+        use_ssl = self.get_option("SSL") == "yes"
+
+        protocol = "https" if use_ssl else "http"
+        if (rport == "80" and not use_ssl) or (rport == "443" and use_ssl):
+            return f"{protocol}://{rhosts}"
+        return f"{protocol}://{rhosts}:{rport}"
+
+    def run(self) -> bool:
+        url = self._build_url()
+        tool = self.get_option("TOOL")
+        wordlist = self._resolve_wordlist(self.get_option("WORDLIST"))
+        extensions = self._resolve_extensions(self.get_option("EXTENSIONS"))
         threads = self.get_option("THREADS")
         recursion = self.get_option("RECURSION") == "yes"
         depth = self.get_option("DEPTH")
@@ -166,313 +145,226 @@ class WebFuzz(ModuleBase):
         filter_code = self.get_option("FILTER_CODE")
         filter_size = self.get_option("FILTER_SIZE")
         filter_words = self.get_option("FILTER_WORDS")
+        output = self.get_option("OUTPUT")
+        extra_args = self.get_option("EXTRA_ARGS")
 
-        # Parse target for output filename
-        target_clean = re.sub(r'[^a-zA-Z0-9]', '_', url)
-        output_file = f"{output_dir}/{target_clean}_{timestamp}_dirs"
+        # Auto-detect tool
+        if tool == "auto":
+            tool = self._detect_tool()
 
-        tool_path = self._get_tool_path(tool)
-
-        if tool == "feroxbuster":
-            cmd = self._build_feroxbuster_cmd(url, wordlist, extensions, threads, recursion,
-                                               depth, timeout, follow, filter_code, filter_size,
-                                               output_file)
-        elif tool == "ffuf":
-            cmd = self._build_ffuf_dir_cmd(url, wordlist, extensions, threads, timeout,
-                                           follow, filter_code, filter_size, filter_words,
-                                           output_file)
-        else:  # gobuster
-            cmd = self._build_gobuster_dir_cmd(url, wordlist, extensions, threads, timeout,
-                                               follow, filter_code, output_file)
-
-        # Replace tool name with full path
-        cmd[0] = tool_path
-
+        self.print_line()
+        self.print_good("=" * 60)
+        self.print_good("  Web Fuzzer - Directory/File Discovery")
+        self.print_good("=" * 60)
+        self.print_status(f"Target: {url}")
+        self.print_status(f"Tool: {tool}")
         self.print_status(f"Wordlist: {wordlist}")
         self.print_status(f"Extensions: {extensions or 'none'}")
-        self.print_status(f"Command: {' '.join(cmd[:10])}...")
+        self.print_status(f"Threads: {threads}")
+        self.print_status(f"Recursion: {'yes (depth=' + depth + ')' if recursion else 'no'}")
         self.print_line()
 
-        return self._run_tool(cmd)
+        if tool == "feroxbuster":
+            return self._run_feroxbuster(url, wordlist, extensions, threads, recursion,
+                                          depth, timeout, follow, filter_code, filter_size,
+                                          output, extra_args)
+        elif tool == "ffuf":
+            return self._run_ffuf(url, wordlist, extensions, threads, timeout, follow,
+                                   filter_code, filter_size, filter_words, output, extra_args)
+        elif tool == "gobuster":
+            return self._run_gobuster(url, wordlist, extensions, threads, timeout, follow,
+                                       filter_code, output, extra_args)
+        else:
+            self.print_error(f"Unsupported tool: {tool}")
+            return False
 
-    def _build_feroxbuster_cmd(self, url: str, wordlist: str, extensions: str, threads: str,
-                                recursion: bool, depth: str, timeout: str, follow: bool,
-                                filter_code: str, filter_size: str, output_file: str) -> List[str]:
-        """Build feroxbuster command"""
-        cmd = [
-            "feroxbuster",
-            "-u", url,
-            "-w", wordlist,
-            "-t", threads,
-            "--timeout", timeout,
-            "-o", f"{output_file}.txt",
-            "--no-state",
-        ]
+    def _run_feroxbuster(self, url, wordlist, extensions, threads, recursion,
+                          depth, timeout, follow, filter_code, filter_size,
+                          output, extra_args) -> bool:
+        """Run directory fuzzing with feroxbuster."""
+        self.print_good("[Feroxbuster Directory Scan]")
+
+        cmd = (
+            f"feroxbuster "
+            f"-u {shlex.quote(url)} "
+            f"-w {shlex.quote(wordlist)} "
+            f"-t {threads} "
+            f"--timeout {timeout} "
+            f"--no-state"
+        )
 
         if extensions:
-            cmd.extend(["-x", extensions.replace(".", "")])
+            cmd += f" -x {extensions}"
 
         if recursion:
-            cmd.extend(["-d", depth])
+            cmd += f" -d {depth}"
         else:
-            cmd.extend(["-n"])  # No recursion
+            cmd += " -n"
 
         if not follow:
-            cmd.append("-r")  # Don't follow redirects (feroxbuster follows by default)
+            cmd += " --dont-follow-redirects"
 
         if filter_code:
             for code in filter_code.split(","):
-                cmd.extend(["-C", code.strip()])
+                cmd += f" -C {code.strip()}"
 
         if filter_size:
             for size in filter_size.split(","):
-                cmd.extend(["-S", size.strip()])
+                cmd += f" -S {size.strip()}"
 
-        return cmd
+        if output:
+            cmd += f" -o {shlex.quote(output)}"
 
-    def _build_ffuf_dir_cmd(self, url: str, wordlist: str, extensions: str, threads: str,
-                            timeout: str, follow: bool, filter_code: str, filter_size: str,
-                            filter_words: str, output_file: str) -> List[str]:
-        """Build ffuf directory command"""
-        cmd = [
-            "ffuf",
-            "-u", f"{url}/FUZZ",
-            "-w", wordlist,
-            "-t", threads,
-            "-timeout", timeout,
-            "-o", f"{output_file}.json",
-            "-of", "json",
-            "-ic",  # Ignore comments in wordlist
-        ]
+        if extra_args:
+            cmd += f" {extra_args}"
+
+        self.print_status(f"Command: {cmd}")
+        self.print_line()
+
+        ret = self.run_in_exegol_stream(cmd, timeout=1800)
+
+        self.print_line()
+        if output:
+            self.print_good(f"Results saved to: {output}")
+
+        self.print_status("Manual command for reference:")
+        self.print_line(f"  {cmd}")
+
+        return ret == 0
+
+    def _run_ffuf(self, url, wordlist, extensions, threads, timeout, follow,
+                   filter_code, filter_size, filter_words, output, extra_args) -> bool:
+        """Run directory fuzzing with ffuf."""
+        self.print_good("[ffuf Directory Scan]")
+
+        cmd = (
+            f"ffuf "
+            f"-u {shlex.quote(url + '/FUZZ')} "
+            f"-w {shlex.quote(wordlist)} "
+            f"-t {threads} "
+            f"-timeout {timeout} "
+            f"-ic -c"
+        )
 
         if extensions:
-            cmd.extend(["-e", extensions])
+            # ffuf wants extensions with dots
+            ext_with_dots = ",".join(f".{e}" if not e.startswith(".") else e for e in extensions.split(","))
+            cmd += f" -e {ext_with_dots}"
 
         if follow:
-            cmd.append("-r")
+            cmd += " -r"
 
         if filter_code:
-            cmd.extend(["-fc", filter_code])
+            cmd += f" -fc {filter_code}"
 
         if filter_size:
-            cmd.extend(["-fs", filter_size])
+            cmd += f" -fs {filter_size}"
 
         if filter_words:
-            cmd.extend(["-fw", filter_words])
+            cmd += f" -fw {filter_words}"
 
-        return cmd
+        if output:
+            cmd += f" -o {shlex.quote(output)} -of json"
 
-    def _build_gobuster_dir_cmd(self, url: str, wordlist: str, extensions: str, threads: str,
-                                timeout: str, follow: bool, filter_code: str, output_file: str) -> List[str]:
-        """Build gobuster directory command"""
-        cmd = [
-            "gobuster", "dir",
-            "-u", url,
-            "-w", wordlist,
-            "-t", threads,
-            "--timeout", f"{timeout}s",
-            "-o", f"{output_file}.txt",
-        ]
+        if extra_args:
+            cmd += f" {extra_args}"
+
+        self.print_status(f"Command: {cmd}")
+        self.print_line()
+
+        ret = self.run_in_exegol_stream(cmd, timeout=1800)
+
+        self.print_line()
+        if output:
+            self.print_good(f"Results saved to: {output}")
+            self._parse_ffuf_results(output)
+
+        self.print_status("Manual command for reference:")
+        self.print_line(f"  {cmd}")
+
+        return ret == 0
+
+    def _run_gobuster(self, url, wordlist, extensions, threads, timeout, follow,
+                       filter_code, output, extra_args) -> bool:
+        """Run directory fuzzing with gobuster."""
+        self.print_good("[Gobuster Directory Scan]")
+
+        cmd = (
+            f"gobuster dir "
+            f"-u {shlex.quote(url)} "
+            f"-w {shlex.quote(wordlist)} "
+            f"-t {threads} "
+            f"--timeout {timeout}s"
+        )
 
         if extensions:
-            cmd.extend(["-x", extensions.lstrip(".")])
+            cmd += f" -x {extensions}"
 
         if follow:
-            cmd.append("-r")
+            cmd += " -r"
 
         if filter_code:
-            # Gobuster uses -b for exclude status codes
-            cmd.extend(["-b", filter_code])
+            cmd += f" -b {filter_code}"
 
-        return cmd
+        if output:
+            cmd += f" -o {shlex.quote(output)}"
 
-    def _fuzz_vhosts(self, url: str, tool: str, output_dir: str, timestamp: str) -> bool:
-        """Virtual host fuzzing"""
-        self.print_line()
-        self.print_good("[VHost Fuzzing]")
-        self.print_line("-" * 40)
+        if extra_args:
+            cmd += f" {extra_args}"
 
-        domain = self.get_option("DOMAIN")
-        if not domain:
-            # Try to extract domain from URL
-            match = re.search(r'https?://([^/:]+)', url)
-            if match:
-                domain = match.group(1)
-            else:
-                self.print_error("DOMAIN is required for vhost fuzzing")
-                return False
-
-        wordlist = self._get_wordlist("vhosts")
-        threads = self.get_option("THREADS")
-        filter_size = self.get_option("FILTER_SIZE")
-        filter_words = self.get_option("FILTER_WORDS")
-
-        target_clean = re.sub(r'[^a-zA-Z0-9]', '_', domain)
-        output_file = f"{output_dir}/{target_clean}_{timestamp}_vhosts"
-
-        tool_path = self._get_tool_path(tool)
-
-        # Get baseline response size first
-        self.print_status(f"Target domain: {domain}")
-        self.print_status("Getting baseline response for filtering...")
-
-        if tool == "ffuf":
-            cmd = [
-                tool_path,
-                "-u", url,
-                "-H", f"Host: FUZZ.{domain}",
-                "-w", wordlist,
-                "-t", threads,
-                "-o", f"{output_file}.json",
-                "-of", "json",
-                "-ic",
-            ]
-
-            if filter_size:
-                cmd.extend(["-fs", filter_size])
-            if filter_words:
-                cmd.extend(["-fw", filter_words])
-
-            # Auto-calibrate if no filters specified
-            if not filter_size and not filter_words:
-                cmd.append("-ac")
-
-        elif tool == "gobuster":
-            cmd = [
-                tool_path, "vhost",
-                "-u", url,
-                "-w", wordlist,
-                "-t", threads,
-                "-o", f"{output_file}.txt",
-                "--append-domain",
-            ]
-        else:
-            # Feroxbuster doesn't have vhost mode, use ffuf
-            self.print_warning("Feroxbuster doesn't support vhost mode, using ffuf")
-            return self._fuzz_vhosts_ffuf(url, domain, wordlist, threads, output_file)
-
-        self.print_status(f"Command: {' '.join(cmd[:10])}...")
+        self.print_status(f"Command: {cmd}")
         self.print_line()
 
-        return self._run_tool(cmd)
+        ret = self.run_in_exegol_stream(cmd, timeout=1800)
 
-    def _fuzz_vhosts_ffuf(self, url: str, domain: str, wordlist: str, threads: str, output_file: str) -> bool:
-        """VHost fuzzing with ffuf fallback"""
-        tool_path = self._get_tool_path("ffuf")
-
-        cmd = [
-            tool_path,
-            "-u", url,
-            "-H", f"Host: FUZZ.{domain}",
-            "-w", wordlist,
-            "-t", threads,
-            "-o", f"{output_file}.json",
-            "-of", "json",
-            "-ac",  # Auto-calibrate
-            "-ic",
-        ]
-
-        return self._run_tool(cmd)
-
-    def _fuzz_subdomains(self, url: str, tool: str, output_dir: str, timestamp: str) -> bool:
-        """Subdomain enumeration via DNS"""
         self.print_line()
-        self.print_good("[Subdomain Fuzzing]")
-        self.print_line("-" * 40)
+        if output:
+            self.print_good(f"Results saved to: {output}")
 
-        domain = self.get_option("DOMAIN")
-        if not domain:
-            match = re.search(r'https?://([^/:]+)', url)
-            if match:
-                domain = match.group(1)
-            else:
-                self.print_error("DOMAIN is required for subdomain fuzzing")
-                return False
+        self.print_status("Manual command for reference:")
+        self.print_line(f"  {cmd}")
 
-        wordlist = self._get_wordlist("subdomains")
-        threads = self.get_option("THREADS")
+        return ret == 0
 
-        target_clean = re.sub(r'[^a-zA-Z0-9]', '_', domain)
-        output_file = f"{output_dir}/{target_clean}_{timestamp}_subdomains"
-
-        tool_path = self._get_tool_path(tool)
-
-        if tool == "gobuster":
-            cmd = [
-                tool_path, "dns",
-                "-d", domain,
-                "-w", wordlist,
-                "-t", threads,
-                "-o", f"{output_file}.txt",
-            ]
-        elif tool == "ffuf":
-            cmd = [
-                tool_path,
-                "-u", f"http://FUZZ.{domain}",
-                "-w", wordlist,
-                "-t", threads,
-                "-o", f"{output_file}.json",
-                "-of", "json",
-                "-mc", "200,301,302,403",
-            ]
-        else:
-            # Use gobuster for DNS
-            self.print_warning("Using gobuster for DNS enumeration")
-            cmd = [
-                "gobuster", "dns",
-                "-d", domain,
-                "-w", wordlist,
-                "-t", threads,
-                "-o", f"{output_file}.txt",
-            ]
-
-        self.print_status(f"Domain: {domain}")
-        self.print_status(f"Command: {' '.join(cmd[:10])}...")
-        self.print_line()
-
-        return self._run_tool(cmd)
-
-    def _run_tool(self, cmd: List[str]) -> bool:
-        """Run fuzzing tool with live output"""
+    def _parse_ffuf_results(self, output_file):
+        """Parse ffuf JSON output and display summary."""
         try:
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
+            import json
+            with open(output_file, 'r') as f:
+                data = json.load(f)
 
-            found_count = 0
-            for line in iter(process.stdout.readline, ''):
-                line = line.rstrip()
-                if line:
-                    # Highlight findings
-                    if any(code in line for code in ["200", "301", "302", "403", "500"]):
-                        self.print_good(line)
-                        found_count += 1
-                    elif "error" in line.lower() or "timeout" in line.lower():
-                        self.print_error(line)
-                    else:
-                        self.print_line(line)
-
-            process.wait()
+            results = data.get("results", [])
+            if not results:
+                return
 
             self.print_line()
-            self.print_status(f"Fuzzing complete. Found {found_count} potential results.")
-            return process.returncode == 0
+            self.print_good(f"Found {len(results)} result(s):")
+            self.print_line(f"{'Path':<50} {'Status':<8} {'Size':<10} {'Words':<8}")
+            self.print_line("-" * 76)
 
-        except FileNotFoundError:
-            self.print_error(f"Tool not found: {cmd[0]}")
-            return False
-        except Exception as e:
-            self.print_error(f"Error running fuzzer: {e}")
-            return False
+            for r in results:
+                path = r.get("input", {}).get("FUZZ", "unknown")
+                status = r.get("status", 0)
+                size = r.get("length", 0)
+                words_count = r.get("words", 0)
+                self.print_good(f"/{path:<49} {status:<8} {size:<10} {words_count:<8}")
+
+        except Exception:
+            pass
 
     def check(self) -> bool:
-        """Check if at least one fuzzing tool is available"""
+        """Check if at least one fuzzing tool is available."""
         for tool in ["feroxbuster", "ffuf", "gobuster"]:
-            if shutil.which(tool) or os.path.exists(f"/opt/tools/bin/{tool}"):
+            if find_tool(tool):
+                self.print_good(f"{tool} found locally")
                 return True
+
+        # Check Exegol
+        for tool in ["feroxbuster", "ffuf", "gobuster"]:
+            ret, stdout, _ = self.run_in_exegol(f"which {tool}", timeout=10)
+            if ret == 0 and stdout.strip():
+                self.print_good(f"{tool} found in Exegol")
+                return True
+
         self.print_error("No fuzzing tool found (need feroxbuster, ffuf, or gobuster)")
         return False

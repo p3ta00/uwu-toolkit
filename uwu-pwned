@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""
+uwu-pwned - Mark credentials as pwned (compromised)
+Part of the uwu-* CTF toolkit
+"""
+
+import sqlite3
+import sys
+import os
+from pathlib import Path
+
+# Dracula Theme Colors
+class Colors:
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    CYAN = '\033[38;2;139;233;253m'
+    GREEN = '\033[38;2;80;250;123m'
+    ORANGE = '\033[38;2;255;184;108m'
+    PINK = '\033[38;2;255;121;198m'
+    PURPLE = '\033[38;2;189;147;249m'
+    RED = '\033[38;2;255;85;85m'
+    YELLOW = '\033[38;2;241;250;140m'
+    COMMENT = '\033[38;2;98;114;164m'
+
+class CTFCredsDB:
+    def __init__(self):
+        self.db_dir = Path(os.getcwd()) / '.ctf'
+        self.db_path = self.db_dir / 'credentials.db'
+
+    def set_status(self, cred_id, status):
+        """Set the status of a credential"""
+        if not self.db_path.exists():
+            return False
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # If setting to pwned or target, clear that status from other credentials
+        if status in ['pwned', 'target']:
+            cursor.execute('UPDATE credentials SET status = "none" WHERE status = ?', (status,))
+
+        cursor.execute('''
+            UPDATE credentials
+            SET status = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (status, cred_id))
+
+        updated = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return updated > 0
+
+    def delete_credential(self, cred_id):
+        """Delete a credential by ID"""
+        if not self.db_path.exists():
+            return False
+
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute('DELETE FROM credentials WHERE id = ?', (cred_id,))
+        deleted = cursor.rowcount
+
+        conn.commit()
+        conn.close()
+        return deleted > 0
+
+def print_help():
+    """Print usage help"""
+    help_text = f"""
+{Colors.PURPLE}╔═══════════════════════════════════════════════════════════╗
+║                                                           ║
+║       {Colors.GREEN}🎯 uwu-pwned - Mark Pwned Credentials 🎯{Colors.PURPLE}         ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝{Colors.RESET}
+
+{Colors.GREEN}USAGE:{Colors.RESET}
+    {Colors.CYAN}uwu-pwned{Colors.RESET} {Colors.ORANGE}<id>{Colors.RESET}           Mark credential as pwned
+    {Colors.CYAN}uwu-pwned{Colors.RESET} {Colors.YELLOW}clear{Colors.RESET} {Colors.ORANGE}<id>{Colors.RESET}    Clear pwned status
+    {Colors.CYAN}uwu-pwned{Colors.RESET} {Colors.YELLOW}delete{Colors.RESET} {Colors.ORANGE}<id>{Colors.RESET}   Delete credential
+    {Colors.CYAN}uwu-pwned{Colors.RESET} {Colors.YELLOW}-h{Colors.RESET}             Show this help
+
+{Colors.GREEN}DESCRIPTION:{Colors.RESET}
+    Mark credentials that you've successfully compromised. Only one
+    credential can be marked as 'pwned' at a time. Marking a new one
+    will automatically clear the previous pwned status.
+
+{Colors.GREEN}OPTIONS:{Colors.RESET}
+    {Colors.ORANGE}<id>{Colors.RESET}               Credential ID to mark as pwned
+    {Colors.YELLOW}clear{Colors.RESET} {Colors.ORANGE}<id>{Colors.RESET}        Clear the pwned status
+    {Colors.YELLOW}delete{Colors.RESET} {Colors.ORANGE}<id>{Colors.RESET}       Delete the credential entirely
+    {Colors.YELLOW}-h, --help{Colors.RESET}        Show this help message
+
+{Colors.GREEN}EXAMPLES:{Colors.RESET}
+    {Colors.COMMENT}# Mark credential ID 3 as pwned{Colors.RESET}
+    {Colors.CYAN}uwu-pwned{Colors.RESET} {Colors.ORANGE}3{Colors.RESET}
+
+    {Colors.COMMENT}# Clear pwned status from credential ID 3{Colors.RESET}
+    {Colors.CYAN}uwu-pwned{Colors.RESET} {Colors.YELLOW}clear{Colors.RESET} {Colors.ORANGE}3{Colors.RESET}
+
+    {Colors.COMMENT}# Delete credential ID 5{Colors.RESET}
+    {Colors.CYAN}uwu-pwned{Colors.RESET} {Colors.YELLOW}delete{Colors.RESET} {Colors.ORANGE}5{Colors.RESET}
+
+{Colors.GREEN}WORKFLOW:{Colors.RESET}
+    {Colors.CYAN}1.{Colors.RESET} List credentials:     {Colors.CYAN}uwu-list{Colors.RESET}
+    {Colors.CYAN}2.{Colors.RESET} Mark as pwned:        {Colors.CYAN}uwu-pwned <id>{Colors.RESET}
+    {Colors.CYAN}3.{Colors.RESET} Export to env:        {Colors.CYAN}uwu-export{Colors.RESET}
+    {Colors.CYAN}4.{Colors.RESET} Use in navi:          {Colors.CYAN}uwu-navi{Colors.RESET}
+
+{Colors.GREEN}RELATED TOOLS:{Colors.RESET}
+    {Colors.CYAN}uwu-loot{Colors.RESET}      Add credentials to database
+    {Colors.CYAN}uwu-list{Colors.RESET}      List all credentials
+    {Colors.CYAN}uwu-target{Colors.RESET}    Mark target credentials
+    {Colors.CYAN}uwu-export{Colors.RESET}    Export to environment variables
+"""
+    print(help_text)
+
+def main():
+    # Check for help flag
+    if len(sys.argv) > 1 and sys.argv[1] in ['-h', '--help', 'help']:
+        print_help()
+        sys.exit(0)
+
+    if len(sys.argv) < 2:
+        print(f"{Colors.RED}Error: Credential ID required{Colors.RESET}")
+        print(f"Run {Colors.CYAN}uwu-pwned -h{Colors.RESET} for help\n")
+        sys.exit(1)
+
+    db = CTFCredsDB()
+
+    # Handle clear command
+    if sys.argv[1] == 'clear':
+        if len(sys.argv) < 3:
+            print(f"{Colors.RED}Error: Credential ID required{Colors.RESET}")
+            sys.exit(1)
+
+        try:
+            cred_id = int(sys.argv[2])
+            if db.set_status(cred_id, 'none'):
+                print(f"\n{Colors.GREEN}✓ Status cleared for credential {cred_id}{Colors.RESET}\n")
+            else:
+                print(f"\n{Colors.RED}✗ Credential not found{Colors.RESET}\n")
+        except ValueError:
+            print(f"{Colors.RED}Error: Invalid ID{Colors.RESET}")
+
+    # Handle delete command
+    elif sys.argv[1] == 'delete':
+        if len(sys.argv) < 3:
+            print(f"{Colors.RED}Error: Credential ID required{Colors.RESET}")
+            sys.exit(1)
+
+        try:
+            cred_id = int(sys.argv[2])
+            if db.delete_credential(cred_id):
+                print(f"\n{Colors.GREEN}✓ Credential deleted successfully!{Colors.RESET}\n")
+            else:
+                print(f"\n{Colors.RED}✗ Credential not found{Colors.RESET}\n")
+        except ValueError:
+            print(f"{Colors.RED}Error: Invalid ID{Colors.RESET}")
+
+    # Mark as pwned
+    else:
+        try:
+            cred_id = int(sys.argv[1])
+            if db.set_status(cred_id, 'pwned'):
+                print(f"\n{Colors.GREEN}✓ Credential {cred_id} marked as PWNED!{Colors.RESET}\n")
+            else:
+                print(f"\n{Colors.RED}✗ Credential not found{Colors.RESET}\n")
+        except ValueError:
+            print(f"{Colors.RED}Error: Invalid ID{Colors.RESET}")
+
+if __name__ == '__main__':
+    main()

@@ -20,8 +20,8 @@ class Config:
         self.globals_file = self.config_dir / "globals.json"
         self.permanent_file = self.config_dir / "permanent.json"
 
-        # Ensure config directory exists
-        self.config_dir.mkdir(parents=True, exist_ok=True)
+        # Ensure config directory exists (0o700 for credential security)
+        self.config_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         # Load configurations
         self._config = self._load_json(self.config_file, self._default_config())
@@ -58,6 +58,9 @@ class Config:
             "TARGET_URL": "Target URL for web attacks",
             "WORKSPACE": "Current workspace name",
             "WORKING_DIR": "Default working directory for file paths",
+            "DC_IP": "Domain Controller IP address",
+            "DC_HOST": "Domain Controller hostname",
+            "FAKETIME": "Spoofed time for Kerberos (fixes clock skew)",
         }
 
         # Path-type variables that should use WORKING_DIR resolution
@@ -313,14 +316,14 @@ class Config:
         self.save()  # Save history
 
     def get(self, name: str, default: Any = None) -> Any:
-        """Get a variable (session > global > permanent)"""
+        """Get a variable (permanent > session > global)"""
         name = name.upper()
+        if name in self._permanent:
+            return self._permanent[name]
         if name in self._session_vars:
             return self._session_vars[name]
         if name in self._globals:
             return self._globals[name]
-        if name in self._permanent:
-            return self._permanent[name]
         return default
 
     def unset(self, name: str) -> bool:
