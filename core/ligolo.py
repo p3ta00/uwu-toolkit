@@ -53,6 +53,8 @@ class LigoloClient:
             "/usr/local/bin/ligolo-proxy",
             "~/.local/bin/ligolo-proxy",
             "/opt/tools/bin/ligolo-proxy",
+            "~/.local/share/ligolo-ng/proxy",
+            "~/go/bin/ligolo-proxy",
         ]
 
         # Check PATH first
@@ -72,6 +74,8 @@ class LigoloClient:
             "/opt/tools/ligolo-ng/agent",
             "/usr/local/bin/ligolo-agent",
             "~/.local/bin/ligolo-agent",
+            "~/.local/share/ligolo-ng/agent",
+            "~/go/bin/ligolo-agent",
         ]
 
         agent = shutil.which("ligolo-agent") or shutil.which("agent")

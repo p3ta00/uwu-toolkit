@@ -19,11 +19,14 @@ from ..targets import TargetManager, print_targets_table
 from ..engagement_db import EngagementDB
 from ..macros import get_macro_manager
 from ..opsec import get_opsec_info, format_opsec_warning, OpsecRating
+from ..module_base import EXEGOL_PATH, KALI_PATH
 from .. import tmux_status
 
 
 def _find_exegol_container() -> Optional[str]:
     """Auto-detect a running Exegol container"""
+    if not shutil.which("docker"):
+        return None
     try:
         result = subprocess.run(
             ["docker", "ps", "--format", "{{.Names}}"],
@@ -40,6 +43,13 @@ def _find_exegol_container() -> Optional[str]:
 def _is_inside_exegol() -> bool:
     """Check if we're running inside an Exegol container"""
     return os.path.exists("/.exegol") or os.path.exists("/opt/.exegol_aliases")
+
+
+def _is_native_linux() -> bool:
+    """Check if we're on a native Linux host (Kali, etc.) — not inside Exegol"""
+    if _is_inside_exegol():
+        return False
+    return os.path.exists("/etc/os-release")
 
 
 class ToolsHandler(HandlerBase):
@@ -70,14 +80,13 @@ class ToolsHandler(HandlerBase):
                     "smb")
 
         # Build command to get module options
-        exegol_path = "/root/.local/bin:/opt/tools/bin:/opt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         nxc_cmd = f"netexec {protocol} -M {nxc_module} --options 2>&1"
 
         try:
             # Check if we're inside Exegol - run directly
             if _is_inside_exegol():
                 result = subprocess.run(
-                    ["bash", "-c", f"export PATH={exegol_path}:$PATH && {nxc_cmd}"],
+                    ["bash", "-c", f"export PATH={EXEGOL_PATH}:$PATH && {nxc_cmd}"],
                     capture_output=True,
                     text=True,
                     timeout=30
@@ -88,15 +97,22 @@ class ToolsHandler(HandlerBase):
                              self.config.get("EXEGOL_CONTAINER") or
                              _find_exegol_container())
 
-                if not container:
+                if container:
+                    result = subprocess.run(
+                        ["docker", "exec", container, "bash", "-ic", f"export PATH={EXEGOL_PATH}:$PATH && {nxc_cmd}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                elif _is_native_linux():
+                    result = subprocess.run(
+                        ["bash", "-c", f"export PATH={KALI_PATH}:$PATH && {nxc_cmd}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                else:
                     return f"\n{Colors.NEON_ORANGE}NXC Module Help{Colors.RESET}\n{Colors.NEON_ORANGE}==============={Colors.RESET}\n  {Colors.NEON_RED}No Exegol container found. Start one to see module options.{Colors.RESET}\n"
-
-                result = subprocess.run(
-                    ["docker", "exec", container, "bash", "-ic", f"export PATH={exegol_path}:$PATH && {nxc_cmd}"],
-                    capture_output=True,
-                    text=True,
-                    timeout=30
-                )
 
             output = result.stdout + result.stderr
 
@@ -547,6 +563,8 @@ class ToolsHandler(HandlerBase):
         try:
             if _is_inside_exegol():
                 self._update_hosts_file_direct(ip, hosts_line)
+            elif _is_native_linux():
+                self._update_hosts_file_native(ip, hosts_line)
             else:
                 container = (self.config.getg("EXEGOL_CONTAINER") or
                              self.config.get("EXEGOL_CONTAINER") or
@@ -580,6 +598,33 @@ class ToolsHandler(HandlerBase):
             f.writelines(new_lines)
 
         print(Style.success(f"/etc/hosts: {hosts_line}"))
+
+    def _update_hosts_file_native(self, ip: str, hosts_line: str) -> None:
+        """Update /etc/hosts on native Linux via sudo"""
+        with open('/etc/hosts', 'r') as f:
+            lines = f.readlines()
+
+        found = False
+        new_lines = []
+        for line in lines:
+            if line.strip() and line.split()[0] == ip:
+                new_lines.append(hosts_line + '\n')
+                found = True
+            else:
+                new_lines.append(line)
+
+        if not found:
+            new_lines.append(hosts_line + '\n')
+
+        content = ''.join(new_lines)
+        proc = subprocess.run(
+            ["sudo", "tee", "/etc/hosts"],
+            input=content, capture_output=True, text=True, timeout=5
+        )
+        if proc.returncode == 0:
+            print(Style.success(f"/etc/hosts: {hosts_line}"))
+        else:
+            print(Style.error(f"Failed to update /etc/hosts: {proc.stderr}"))
 
     def _update_hosts_file_docker(self, container: str, ip: str, hosts_line: str) -> None:
         """Update /etc/hosts via docker exec"""
@@ -786,23 +831,21 @@ class ToolsHandler(HandlerBase):
                 cmd = f"DumpNTLMInfo.py {dc_ip}"
 
             if _is_inside_exegol():
-                exegol_path = "/root/.local/bin:/opt/tools/bin:/opt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                 result = subprocess.run(
-                    ["bash", "-l", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"],
+                    ["bash", "-l", "-c", f"export PATH={EXEGOL_PATH}:$PATH && {cmd}"],
                     capture_output=True, text=True, timeout=15
                 )
             else:
                 container = self.config.get("EXEGOL_CONTAINER")
                 if container:
-                    exegol_path = "/root/.local/bin:/opt/tools/bin:/opt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
                     result = subprocess.run(
                         ["docker", "exec", container,
-                         "bash", "-l", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"],
+                         "bash", "-l", "-c", f"export PATH={EXEGOL_PATH}:$PATH && {cmd}"],
                         capture_output=True, text=True, timeout=15
                     )
                 else:
                     result = subprocess.run(
-                        ["bash", "-c", cmd],
+                        ["bash", "-c", f"export PATH={KALI_PATH}:$PATH && {cmd}"],
                         capture_output=True, text=True, timeout=15
                     )
             output = result.stdout + result.stderr
@@ -847,17 +890,17 @@ class ToolsHandler(HandlerBase):
             return
 
         # Build command - write to temp file first to check for duplicates
-        exegol_path = "/root/.local/bin:/opt/tools/bin:/opt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         tmp_hosts = "/tmp/.uwu_hosts_tmp"
         nxc_cmd = f"netexec smb {target} --generate-hosts-file {tmp_hosts} 2>&1"
 
         print(Style.info(f"Discovering hosts for {target}..."))
 
         try:
-            if _is_inside_exegol():
-                # Run nxc to temp file
+            if _is_inside_exegol() or _is_native_linux():
+                # Run nxc locally (inside Exegol or native Linux)
+                run_path = EXEGOL_PATH if _is_inside_exegol() else KALI_PATH
                 result = subprocess.run(
-                    ["bash", "-c", f"export PATH={exegol_path}:$PATH && rm -f {tmp_hosts} && {nxc_cmd}"],
+                    ["bash", "-c", f"export PATH={run_path}:$PATH && rm -f {tmp_hosts} && {nxc_cmd}"],
                     capture_output=True,
                     text=True,
                     timeout=30
@@ -882,9 +925,15 @@ class ToolsHandler(HandlerBase):
                     if new_ip and new_ip in current_hosts:
                         print(Style.warning(f"Entry for {new_ip} already exists in /etc/hosts"))
                     else:
-                        # Append new entry
-                        with open('/etc/hosts', 'a') as f:
-                            f.write(new_entry + '\n')
+                        # Append new entry — use sudo on native Linux
+                        if _is_native_linux():
+                            subprocess.run(
+                                ["sudo", "bash", "-c", f"echo '{new_entry}' >> /etc/hosts"],
+                                timeout=5
+                            )
+                        else:
+                            with open('/etc/hosts', 'a') as f:
+                                f.write(new_entry + '\n')
                         print(Style.success(f"Added to /etc/hosts: {new_entry}"))
 
             else:
@@ -899,7 +948,7 @@ class ToolsHandler(HandlerBase):
                 # Run nxc to temp file
                 result = subprocess.run(
                     ["docker", "exec", container, "bash", "-ic",
-                     f"export PATH={exegol_path}:$PATH && rm -f {tmp_hosts} && {nxc_cmd}"],
+                     f"export PATH={EXEGOL_PATH}:$PATH && rm -f {tmp_hosts} && {nxc_cmd}"],
                     capture_output=True,
                     text=True,
                     timeout=30

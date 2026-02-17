@@ -264,6 +264,8 @@ class VariableHandler(HandlerBase):
         try:
             if self.console._is_inside_exegol():
                 self._update_hosts_file_direct(ip, hosts_line)
+            elif self.console._is_native_linux():
+                self._update_hosts_file_native(ip, hosts_line)
             else:
                 container = (self.config.getg("EXEGOL_CONTAINER") or
                              self.config.get("EXEGOL_CONTAINER") or
@@ -297,6 +299,33 @@ class VariableHandler(HandlerBase):
             f.writelines(new_lines)
 
         print(Style.success(f"/etc/hosts: {hosts_line}"))
+
+    def _update_hosts_file_native(self, ip: str, hosts_line: str) -> None:
+        """Update /etc/hosts on native Linux via sudo"""
+        with open('/etc/hosts', 'r') as f:
+            lines = f.readlines()
+
+        found = False
+        new_lines = []
+        for line in lines:
+            if line.strip() and line.split()[0] == ip:
+                new_lines.append(hosts_line + '\n')
+                found = True
+            else:
+                new_lines.append(line)
+
+        if not found:
+            new_lines.append(hosts_line + '\n')
+
+        content = ''.join(new_lines)
+        proc = subprocess.run(
+            ["sudo", "tee", "/etc/hosts"],
+            input=content, capture_output=True, text=True, timeout=5
+        )
+        if proc.returncode == 0:
+            print(Style.success(f"/etc/hosts: {hosts_line}"))
+        else:
+            print(Style.error(f"Failed to update /etc/hosts: {proc.stderr}"))
 
     def _update_hosts_file_docker(self, container: str, ip: str, hosts_line: str) -> None:
         """Update /etc/hosts via docker exec"""

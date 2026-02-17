@@ -11,7 +11,7 @@ import re
 import shlex
 import shutil
 import subprocess
-from core.module_base import ModuleBase, ModuleType, Platform, find_tool
+from core.module_base import ModuleBase, ModuleType, Platform, find_tool, EXEGOL_PATH, KALI_PATH
 
 
 # =============================================================================
@@ -1265,13 +1265,15 @@ class ImpacketModule(ModuleBase):
                 container = self.get_option("EXEGOL_CONTAINER")
                 if not container:
                     container = self._find_exegol_container()
-                if not container:
+                if container:
+                    tmux_cmd = f"docker exec -it {shlex.quote(container)} bash -l -c {shlex.quote(f'export PATH={EXEGOL_PATH}:$PATH && {cmd_str}')}"
+                elif self._is_native_linux():
+                    tmux_cmd = f"bash -c {shlex.quote(f'export PATH={KALI_PATH}:$PATH && {cmd_str}')}"
+                else:
                     self.print_error("No Exegol container found. Set EXEGOL_CONTAINER option.")
                     return False
-                exegol_path = "/root/.local/bin:/opt/tools/bin:/opt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-                docker_cmd = f"docker exec -it {shlex.quote(container)} bash -l -c {shlex.quote(f'export PATH={exegol_path}:$PATH && {cmd_str}')}"
                 session_name = self._generate_session_name()
-                return self._run_in_tmux(docker_cmd, session_name)
+                return self._run_in_tmux(tmux_cmd, session_name)
             else:
                 ret = self.run_in_exegol_stream(cmd_str, timeout=300)
                 return ret == 0

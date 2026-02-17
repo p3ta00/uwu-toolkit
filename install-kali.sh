@@ -75,6 +75,7 @@ SYSTEM_PKGS=(
     jq
     rlwrap
     smbclient
+    iproute2
 )
 
 MISSING_SYS=()
@@ -221,6 +222,28 @@ mkdir -p "${CONFIG_DIR}/loot"
 mkdir -p "${CONFIG_DIR}/sessions"
 mkdir -p "${HOME}/.local/share/potatoes"
 mkdir -p "${HOME}/.local/share/ligolo-ng"
+
+# Check for Ligolo-ng proxy
+if command -v ligolo-proxy &>/dev/null; then
+    print_good "Ligolo-ng proxy found ($(which ligolo-proxy))"
+else
+    LIGOLO_FOUND=""
+    for lp in "$HOME/.local/share/ligolo-ng/proxy" "$HOME/go/bin/ligolo-proxy"; do
+        if [ -x "$lp" ]; then
+            LIGOLO_FOUND="$lp"
+            break
+        fi
+    done
+    if [ -n "$LIGOLO_FOUND" ]; then
+        print_good "Ligolo-ng proxy found ($LIGOLO_FOUND)"
+    else
+        print_warning "Ligolo-ng proxy not found"
+        print_status "Install options:"
+        echo "  1. Run 'ligolo download' from within UwU"
+        echo "  2. go install github.com/nicocha30/ligolo-ng/cmd/proxy@latest"
+        echo "  3. Download from https://github.com/nicocha30/ligolo-ng/releases"
+    fi
+fi
 
 print_good "Directories ready"
 echo

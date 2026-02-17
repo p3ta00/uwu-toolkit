@@ -344,6 +344,8 @@ class UwUConsole:
 
     def _find_exegol_container(self) -> Optional[str]:
         """Auto-detect a running Exegol container"""
+        if not shutil.which("docker"):
+            return None
         try:
             result = subprocess.run(
                 ["docker", "ps", "--format", "{{.Names}}"],
@@ -359,6 +361,12 @@ class UwUConsole:
     def _is_inside_exegol(self) -> bool:
         """Check if we're running inside an Exegol container"""
         return os.path.exists("/.exegol") or os.path.exists("/opt/.exegol_aliases")
+
+    def _is_native_linux(self) -> bool:
+        """Check if we're on a native Linux host (Kali, etc.) — not inside Exegol"""
+        if self._is_inside_exegol():
+            return False
+        return os.path.exists("/etc/os-release")
 
     # =========================================================================
     # Prompt, Main Loop, Command Dispatch

@@ -22,6 +22,16 @@ EXTRA_PATHS = [
     "/bin",
 ]
 
+# Canonical PATH strings for command execution
+EXEGOL_PATH = "/root/.local/bin:/opt/tools/bin:/opt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+KALI_PATH = ":".join([
+    os.path.expanduser("~/.local/bin"),
+    "/usr/local/sbin", "/usr/local/bin",
+    "/usr/sbin", "/usr/bin",
+    "/sbin", "/bin",
+])
+
 
 def find_tool(name: str) -> Optional[str]:
     """Find a tool in extended PATH"""
@@ -355,6 +365,12 @@ class ModuleBase(ABC):
             os.path.exists("/opt/tools") and os.path.exists("/root/.exegol")
         )
 
+    def _is_native_linux(self) -> bool:
+        """Check if we're on a native Linux host (Kali, etc.) — not inside Exegol"""
+        if self._is_inside_exegol():
+            return False
+        return os.path.exists("/etc/os-release")
+
     def run_in_exegol(
         self,
         cmd: str,
@@ -375,9 +391,7 @@ class ModuleBase(ABC):
 
         # If already inside Exegol, run directly
         if self._is_inside_exegol():
-            exegol_path = "/root/.local/bin:/opt/tools/bin:/opt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-            # Use login shell (-l) to initialize pyenv
-            full_cmd = ["bash", "-l", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"]
+            full_cmd = ["bash", "-l", "-c", f"export PATH={EXEGOL_PATH}:$PATH && {cmd}"]
             try:
                 result = subprocess.run(
                     full_cmd,
@@ -398,15 +412,27 @@ class ModuleBase(ABC):
         if not container:
             container = self._find_exegol_container()
             if not container:
+                # Native Linux fallback (Kali, etc.)
+                if self._is_native_linux():
+                    full_cmd = ["bash", "-c", f"export PATH={KALI_PATH}:$PATH && {cmd}"]
+                    try:
+                        result = subprocess.run(
+                            full_cmd,
+                            capture_output=True,
+                            text=True,
+                            timeout=timeout
+                        )
+                        return result.returncode, result.stdout, result.stderr
+                    except subprocess.TimeoutExpired:
+                        return -1, "", "Command timed out"
+                    except Exception as e:
+                        return -1, "", str(e)
                 return -1, "", "No Exegol container found. Set EXEGOL_CONTAINER option."
 
         # Use docker exec for reliable output capture
-        # Set PATH to include common tool locations in Exegol
-        # Use login shell (-l) to initialize pyenv
-        exegol_path = "/root/.local/bin:/opt/tools/bin:/opt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         full_cmd = [
             "docker", "exec", container,
-            "bash", "-l", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"
+            "bash", "-l", "-c", f"export PATH={EXEGOL_PATH}:$PATH && {cmd}"
         ]
 
         try:
@@ -442,23 +468,25 @@ class ModuleBase(ABC):
         import select
 
         timeout = timeout or self.get_option("TIMEOUT", 120)
-        exegol_path = "/root/.local/bin:/opt/tools/bin:/opt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
         # Build command - use login shell (-l) for pyenv initialization
         if self._is_inside_exegol():
-            full_cmd = ["bash", "-l", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"]
+            full_cmd = ["bash", "-l", "-c", f"export PATH={EXEGOL_PATH}:$PATH && {cmd}"]
         else:
             container = container or self.get_option("EXEGOL_CONTAINER")
             if not container:
                 container = self._find_exegol_container()
-                if not container:
-                    self.print_error("No Exegol container found. Set EXEGOL_CONTAINER option.")
-                    return -1
 
-            full_cmd = [
-                "docker", "exec", container,
-                "bash", "-l", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"
-            ]
+            if container:
+                full_cmd = [
+                    "docker", "exec", container,
+                    "bash", "-l", "-c", f"export PATH={EXEGOL_PATH}:$PATH && {cmd}"
+                ]
+            elif self._is_native_linux():
+                full_cmd = ["bash", "-c", f"export PATH={KALI_PATH}:$PATH && {cmd}"]
+            else:
+                self.print_error("No Exegol container found. Set EXEGOL_CONTAINER option.")
+                return -1
 
         try:
             process = subprocess.Popen(
@@ -509,25 +537,24 @@ class ModuleBase(ABC):
 
         Returns: return_code
         """
-        exegol_path = "/root/.local/bin:/opt/tools/bin:/opt/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
         # Build command - use login shell (-l) for pyenv initialization
         if self._is_inside_exegol():
-            # Already inside Exegol - run directly
-            full_cmd = ["bash", "-l", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"]
+            full_cmd = ["bash", "-l", "-c", f"export PATH={EXEGOL_PATH}:$PATH && {cmd}"]
         else:
             container = container or self.get_option("EXEGOL_CONTAINER")
             if not container:
                 container = self._find_exegol_container()
-                if not container:
-                    self.print_error("No Exegol container found. Set EXEGOL_CONTAINER option.")
-                    return -1
 
-            # Use -it for interactive terminal
-            full_cmd = [
-                "docker", "exec", "-it", container,
-                "bash", "-l", "-c", f"export PATH={exegol_path}:$PATH && {cmd}"
-            ]
+            if container:
+                full_cmd = [
+                    "docker", "exec", "-it", container,
+                    "bash", "-l", "-c", f"export PATH={EXEGOL_PATH}:$PATH && {cmd}"
+                ]
+            elif self._is_native_linux():
+                full_cmd = ["bash", "-c", f"export PATH={KALI_PATH}:$PATH && {cmd}"]
+            else:
+                self.print_error("No Exegol container found. Set EXEGOL_CONTAINER option.")
+                return -1
 
         try:
             # Run without capturing - direct terminal access
@@ -541,6 +568,8 @@ class ModuleBase(ABC):
 
     def _find_exegol_container(self) -> Optional[str]:
         """Auto-detect a running Exegol container"""
+        if not shutil.which("docker"):
+            return None
         try:
             result = subprocess.run(
                 ["docker", "ps", "--format", "{{.Names}}"],
